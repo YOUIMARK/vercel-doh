@@ -17,6 +17,8 @@ export interface DoHConfig {
   ecsUpstreamUrls: string[];
   /** dns-json upstreams for the JSON API. */
   jsonUpstreamUrls: string[];
+  /** Base path for the DoH endpoints (path obfuscation). Default: /dns-query. */
+  dohPath: string;
   /** Globally auto-attach ECS to queries without one (privacy: default off). */
   autoAddEcs: boolean;
   ipv4EcsPrefixLength: number;
@@ -43,6 +45,7 @@ export const DEFAULTS = {
   UPSTREAM_DOH_URLS: "https://cloudflare-dns.com/dns-query",
   ECS_UPSTREAM_DOH_URLS: "https://dns.google/dns-query",
   JSON_UPSTREAM_DOH_URLS: "https://dns.google/resolve",
+  DOH_PATH: "/dns-query",
   AUTO_ADD_ECS: false,
   IPV4_ECS_PREFIX_LENGTH: 24,
   IPV6_ECS_PREFIX_LENGTH: 56,
@@ -127,11 +130,25 @@ function parseDomainMappings(value: string | undefined): Record<string, DomainMa
   return out;
 }
 
+/**
+ * Parses the DoH base path. Must be a single URL path segment starting with "/",
+ * e.g. "/dns-query" or "/3f9a2b7c". Used for path obfuscation: when set to a
+ * non-default value, the standard /dns-query endpoints are NOT registered.
+ */
+export function parseDohPath(value: string | undefined): string {
+  const raw = value === undefined || value === "" ? DEFAULTS.DOH_PATH : value.trim();
+  if (!/^\/[A-Za-z0-9_-]+$/.test(raw)) {
+    throw new Error(`invalid DOH_PATH: "${raw}" (expected a single path segment, e.g. /dns-query)`);
+  }
+  return raw;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
   const config: DoHConfig = {
     upstreamUrls: parseUrlList(env.UPSTREAM_DOH_URLS, DEFAULTS.UPSTREAM_DOH_URLS),
     ecsUpstreamUrls: parseUrlList(env.ECS_UPSTREAM_DOH_URLS, DEFAULTS.ECS_UPSTREAM_DOH_URLS),
     jsonUpstreamUrls: parseUrlList(env.JSON_UPSTREAM_DOH_URLS, DEFAULTS.JSON_UPSTREAM_DOH_URLS),
+    dohPath: parseDohPath(env.DOH_PATH),
     autoAddEcs: parseBool(env.AUTO_ADD_ECS, DEFAULTS.AUTO_ADD_ECS),
     ipv4EcsPrefixLength: parseNumber(env.IPV4_ECS_PREFIX_LENGTH, DEFAULTS.IPV4_ECS_PREFIX_LENGTH, 0, 32, "IPV4_ECS_PREFIX_LENGTH"),
     ipv6EcsPrefixLength: parseNumber(env.IPV6_ECS_PREFIX_LENGTH, DEFAULTS.IPV6_ECS_PREFIX_LENGTH, 0, 128, "IPV6_ECS_PREFIX_LENGTH"),

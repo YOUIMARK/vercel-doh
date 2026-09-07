@@ -16,7 +16,9 @@ const endpointCode = document.getElementById("endpoint-code");
 const copyButton = document.getElementById("copy-endpoint");
 
 // ── DoH endpoint display ────────────────────────────────────────────────
-const endpoint = `${location.origin}/dns-query`;
+// The server injects the configured base path via window.DOH_ENDPOINT
+// (path obfuscation); default to /dns-query when absent.
+const endpoint = `${location.origin}${window.DOH_ENDPOINT || "/dns-query"}`;
 if (endpointCode) endpointCode.textContent = endpoint;
 if (copyButton) {
   copyButton.addEventListener("click", async () => {

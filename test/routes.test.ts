@@ -152,6 +152,13 @@ describe("CORS / aux endpoints", () => {
     expect(html).toContain('id="dns-form"');
     expect(html).toContain('src="/script.js"');
     expect(html).toContain('href="/style.css"');
+    expect(html).toContain('window.DOH_ENDPOINT="/dns-query"');
+  });
+
+  it("exposes the obfuscated DoH path to the frontend", async () => {
+    const res = await makeApp({ DOH_PATH: "/x9k2" }).request("/");
+    const html = await res.text();
+    expect(html).toContain('window.DOH_ENDPOINT="/x9k2"');
   });
 
   it("serves dns-json for the JSON API", async () => {
@@ -250,5 +257,58 @@ describe("path-based provider mapping", () => {
     expect(res.status).toBe(200);
     const calledUrl = String(vi.mocked(fetch).mock.calls[0]![0]);
     expect(calledUrl.startsWith("https://dns.google/dns-query?dns=")).toBe(true);
+  });
+});
+
+describe("DOH_PATH obfuscation", () => {
+  it("serves DoH at the custom path", async () => {
+    const app = makeApp({ DOH_PATH: "/x9k2" });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(new Response(buildResponse(query, { ttl: 60 }), { status: 200 }));
+
+    const res = await app.request(`/x9k2?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/dns-message");
+    const calledUrl = String(vi.mocked(fetch).mock.calls[0]![0]);
+    expect(calledUrl).toContain("?dns=");
+  });
+
+  it("returns 404 for the standard /dns-query path when obfuscated", async () => {
+    const app = makeApp({ DOH_PATH: "/x9k2" });
+    const query = buildQuery();
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(404);
+  });
+
+  it("routes {base}/{provider} to the mapped upstream", async () => {
+    const app = makeApp({
+      DOH_PATH: "/x9k2",
+      DOMAIN_MAPPINGS: JSON.stringify({ google: { targetDomain: "dns.google" } }),
+    });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(new Response(buildResponse(query, { ttl: 60 }), { status: 200 }));
+
+    const res = await app.request(`/x9k2/google?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    const calledUrl = String(vi.mocked(fetch).mock.calls[0]![0]);
+    expect(calledUrl.startsWith("https://dns.google/dns-query?dns=")).toBe(true);
+  });
+
+  it("supports /auto_ecs under the custom path", async () => {
+    const app = makeApp({ DOH_PATH: "/x9k2" });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(new Response(buildResponse(query, { ttl: 60 }), { status: 200 }));
+    const res = await app.request("/x9k2/auto_ecs", {
+      method: "POST",
+      headers: {
+        ...acceptMessage,
+        "content-type": "application/dns-message",
+        "x-vercel-forwarded-for": "8.8.8.8",
+      },
+      body: query,
+    });
+    expect(res.status).toBe(200);
+    const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
+    expect(hasMeaningfulEcs(sent.body as Uint8Array)).toBe(true);
   });
 });

@@ -26,14 +26,15 @@ export const DNS_MESSAGE = "application/dns-message";
 
 export type EcsBehavior = "default" | "force_enable" | "force_disable";
 
-/** Extracts the optional provider segment from paths like /dns-query/{provider}. */
-export function providerFromPath(pathname: string): string | null {
-  const segments = pathname.split("/").filter((s) => s.length > 0);
-  if (segments.length >= 2 && segments[0] === "dns-query") {
-    const provider = segments[1];
-    if (provider && provider !== "auto_ecs" && provider !== "no_ecs") return provider;
-  }
-  return null;
+/** Extracts the optional provider segment from paths like {base}/{provider}. */
+export function providerFromPath(pathname: string, basePath: string): string | null {
+  const base = basePath.replace(/\/+$/, "");
+  if (pathname === base) return null;
+  if (!pathname.startsWith(`${base}/`)) return null;
+  const rest = pathname.slice(base.length + 1);
+  const provider = rest.split("/")[0];
+  if (!provider || provider === "auto_ecs" || provider === "no_ecs") return null;
+  return provider;
 }
 
 export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
@@ -104,7 +105,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     const hasEcs = hasEcsInitially || ecsAdded;
     let upstreamList =
       hasEcs && config.ecsUpstreamUrls.length > 0 ? config.ecsUpstreamUrls : config.upstreamUrls;
-    const provider = providerFromPath(c.req.path);
+    const provider = providerFromPath(c.req.path, config.dohPath);
     if (provider) {
       const mapped = resolveProvider(config, provider);
       if (!mapped) return textError(404, `Unknown provider: ${provider}`, corsHeaders());
@@ -158,6 +159,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
 }
 
 function infoText(config: DoHConfig): Response {
+  const base = config.dohPath;
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>vercel-doh</title>
@@ -167,12 +169,12 @@ function infoText(config: DoHConfig): Response {
 <h1>vercel-doh</h1>
 <p>v${config.appVersion} — DNS over HTTPS 转发代理(部署于 Vercel,Hono + Node.js + Fluid compute)。</p>
 <p>这是一个 <b>DoH 端点</b>,请用支持 DoH 的客户端访问,而不是浏览器:</p>
-<pre>  GET  /dns-query?dns=&lt;base64url&gt;        (Accept: application/dns-message)
-  POST /dns-query                          (Content-Type: application/dns-message)</pre>
+<pre>  GET  ${base}?dns=&lt;base64url&gt;        (Accept: application/dns-message)
+  POST ${base}                          (Content-Type: application/dns-message)</pre>
 <ul>
-<li><code>/dns-query</code> — 标准端点(默认不附加 ECS)</li>
-<li><code>/dns-query/auto_ecs</code> — 强制为请求附加 EDNS Client Subnet</li>
-<li><code>/dns-query/no_ecs</code> — 强制禁用 ECS</li>
+<li><code>${base}</code> — 标准端点(默认不附加 ECS)</li>
+<li><code>${base}/auto_ecs</code> — 强制为请求附加 EDNS Client Subnet</li>
+<li><code>${base}/no_ecs</code> — 强制禁用 ECS</li>
 <li><code>/dns-query-json</code> — dns-json API(浏览器查询工具)</li>
 <li><code>/health</code> — 健康检查</li>
 </ul>

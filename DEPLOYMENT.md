@@ -35,6 +35,7 @@ vercel deploy --prod
 | 变量 | 默认值 | 建议 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 想多上游容错就逗号分隔,如 `https://cloudflare-dns.com/dns-query,https://dns.google/dns-query` |
+| `DOH_PATH` | `/dns-query` | **路径混淆**: 改成随机路径段后,DoH 端点挂到新路径,标准 `/dns-query` 自动 404 |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 带 ECS 的请求走这里 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | 网页工具的 dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 需要地域解析再开,会向上游泄露客户端子网 |
@@ -83,24 +84,19 @@ curl -sS https://<你的项目>.vercel.app/health   # → ok
 
 > 目标场景: 把自用 DoH 端点公开到公网,既要能用,又别被扫描器/滥用者打爆。
 
-### 1. 路径混淆(降低被扫描概率)
+### 1. 路径混淆(环境变量驱动,推荐)
 
-DoH 标准路径 `/dns-query` 是公开知识,爬虫一抓一个准。用 `vercel.json` 的
-**rewrites** 把 DoH 端点挪到一个随机路径,客户端用新路径,标准路径可保留或屏蔽:
-
-```jsonc
-// vercel.json — 追加 rewrites(替换 <SECRET> 为随机串)
-{
-  "rewrites": [
-    { "source": "/<SECRET>", "destination": "/dns-query" },
-    { "source": "/<SECRET>/:path*", "destination": "/dns-query/:path*" }
-  ]
-}
-```
+设置环境变量 **`DOH_PATH`** 为随机路径段,DoH 端点即挂到该路径,
+**标准 `/dns-query` 自动失效(返回 404)**,混淆真正生效。
 
 ```bash
 # 生成随机路径段
-openssl rand -hex 8     # 例如 3f9a2b7c8d1e4f5a
+openssl rand -hex 8        # 例如 3f9a2b7c8d1e4f5a
+```
+
+Dashboard → Settings → Environment Variables 添加:
+```text
+DOH_PATH = /3f9a2b7c8d1e4f5a
 ```
 
 部署后客户端配置为:
@@ -108,6 +104,12 @@ openssl rand -hex 8     # 例如 3f9a2b7c8d1e4f5a
 https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a            # GET ?dns=…
 https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 ```
+
+行为细节:
+- `DOH_PATH` 必须是**单个路径段**(`/xxx` 格式,字母/数字/`-`/`_`),非法值会在启动时报错
+- 设置后标准 `/dns-query`、`/dns-query/auto_ecs` 等**不再注册**,返回 404
+- 网页工具与信息页**自动**显示新端点(无需改前端);`/dns-query-json`、`/health`、`/` 保持固定路径
+- 未设置时行为不变(默认 `/dns-query`)
 
 > ⚠️ 混淆≠安全,只是把端点从「公开约定路径」变成「不易被发现」。
 > 真正的滥用防护要靠下面的限流/白名单。

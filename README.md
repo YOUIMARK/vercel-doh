@@ -68,6 +68,7 @@ curl -X POST --data-binary @query.bin \
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 常规上游,逗号分隔(顺序转移) |
+| `DOH_PATH` | `/dns-query` | DoH 端点路径。改成随机路径(如 `/3f9a2b7c`)即路径混淆,标准路径自动 404 |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 请求带 ECS 时使用的上游 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 全局自动附加 ECS(默认关,隐私) |

@@ -13,6 +13,7 @@ export function health() {
 
 export function homePage(config: DoHConfig) {
   return (): Response => {
+    const dohEndpoint = config.dohPath;
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -21,6 +22,7 @@ export function homePage(config: DoHConfig) {
 <title>vercel-doh · DNS 查询</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 <link rel="stylesheet" href="/style.css">
+<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>
 </head>
 <body>
 <div class="wrap">
@@ -62,7 +64,7 @@ export function homePage(config: DoHConfig) {
       <button type="button" class="copy-btn" id="copy-endpoint">复制</button>
     </div>
     <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
-    上游: ${config.upstreamUrls.join(", ")} · 查询仅转发给 1 个上游,默认不附加 ECS,保护隐私。</p>
+    端点路径: <code>${dohEndpoint}</code> · 查询仅转发给 1 个上游,默认不附加 ECS,保护隐私。</p>
   </section>
 
   <section class="card">
