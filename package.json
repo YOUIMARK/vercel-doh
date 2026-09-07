@@ -1,0 +1,27 @@
+{
+  "name": "vercel-doh",
+  "version": "1.0.0",
+  "description": "DNS over HTTPS (DoH) forwarding proxy for Vercel — Hono + Node.js runtime + Fluid compute. Fuses the strengths of 8 open-source Vercel DoH projects.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/dev.ts",
+    "start": "tsx src/dev.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
