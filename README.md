@@ -15,23 +15,25 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 
 - **RFC 8484 兼容**: GET `?dns=<base64url>` 与 POST `application/dns-message`
   - 正确状态码: 400 / 405 / 406 / 413 / 415 / 502;成功响应 `Content-Type: application/dns-message`
-  - **协议门**: 查询先过校验(QDCOUNT=1 / 结构完整 / 单 OPT / ECS 合法),不合格直接 400,不触上游
+  - **协议门**: 查询先过校验(QDCOUNT=1 / QR=0 / OPCODE=0 / 结构完整 / 单 OPT / ECS 合法),不合格直接 400,不触上游
 - **隐私默认值**:
   - 默认只把查询发给 **1 个**上游(轮询),失败才顺序转移,**绝不并发广播**
   - 默认**不附加 ECS**;上游出站头为 **allowlist**(Authorization/Cookie/XFF 等一律不外发)
   - ECS `/0`(客户端声明不披露地址)被尊重,绝不注入真实子网
-- **健壮**: 单上游 3s 超时;上游仅接受 **2xx + application/dns-message + 结构合法**的响应,
-  否则故障转移(非 2xx body 绝不当作 DNS 应答);`redirect: "error"` 防 SSRF;
+- **健壮**: 单上游 3s 超时;上游仅接受 **2xx + 精确 `application/dns-message` + 结构合法 + 响应回显请求 ID/Question** 的应答,
+  且响应体有 64KB 上限,否则故障转移(非 2xx body 绝不当作 DNS 应答);`redirect: "error"` 防 SSRF;
   全部失败返回合法的 SERVFAIL dns-message(200)
 - **TTL 感知缓存**: 正向按 Answer 最小 TTL;NXDOMAIN/NODATA 按 RFC 2308
-  `min(SOA TTL, SOA.MINIMUM)`;SERVFAIL/REFUSED/其它 RCODE 一律 `no-store`;
-  POST / 含 ECS 一律 `no-store`
+  `min(SOA TTL, SOA.MINIMUM)`(**无 SOA 的负应答不缓存**);
+  SERVFAIL/REFUSED/其它 RCODE(含 EDNS extended,如 BADVERS=16)一律 `no-store`;
+  POST / 含 ECS(请求或响应)一律 `no-store`
 - **ECS 支持(默认关)**: `/dns-query/auto_ecs` 强制附加、`/dns-query/no_ecs`
-  强制禁用;客户端 IP 取可信头链(`x-vercel-forwarded-for` → `x-real-ip` →
-  XFF 最右段),过滤私网/保留地址,**不信任可伪造的最左段**
+  强制禁用(**并剥离客户端已带的 ECS**,而非仅不注入);客户端 IP 取可信头链
+  (`x-vercel-forwarded-for` → `x-real-ip` → XFF 最右段),过滤私网/保留地址,
+  **不信任可伪造的最左段**
 - **路径映射(可选)**: `/dns-query/{provider}` 经 `DOMAIN_MAPPINGS` 路由到指定上游
 - **URL flags(按请求覆盖环境变量)**: 在端点路径后追加
-  `/v4`(只返回 A 记录)/`/v6`(只返回 AAAA 记录)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS)/
+  `/v4`(只返回 A 记录)/`/v6`(只返回 AAAA 记录)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS,剥离已有 ECS)/
   `/ecs-<IP>`(强制 ECS 并用指定 IP 作为子网,如 `/ecs-8.8.8.8`,可用于测试地域解析),
   可组合且顺序任意,如 `/dns-query/v4/ecs-8.8.8.8`;URL 优先于环境变量
   (v4/v6 = **答案族**: 代理把查询类型重写为 A/AAAA,而非限制连接地址;
@@ -39,10 +41,12 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 - **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
   **DoH 基路径同样支持 JSON 查询**(`/youimark?name=...` 即 dns.google/resolve 风格,
   无需特定 Accept);flag 后缀同样生效,如 `/dns-query-json/v4/ecs`
-  (ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数)
+  (ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数);
+  上游应答**必须能解析为 dns-json schema**,缓存按 Answer/Authority TTL 感知(无 TTL 信息不缓存)
 - **隐私**: 前端**默认隐藏 DoH 端点路径**(路径混淆不泄露);设置
   `SHOW_DOH_ENDPOINT=true` 后前端才显示并可生成客户端端点 URL
-- **代理卫生**: 请求体上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)
+- **代理卫生**: 请求体/上游响应上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)、
+  Content-Type/Accept 按媒体类型精确协商(`;q=0` 即不接受,`application/dns-messageevil` 不匹配)
 
 ## 快速开始
 
@@ -103,7 +107,7 @@ curl -X POST --data-binary @query.bin \
 ## 测试
 
 ```bash
-npm test          # vitest 全量(147 个用例)
+npm test          # vitest 全量(230 个用例)
 npx tsc --noEmit  # 严格类型检查
 npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展名会报 TS2835)
 ```
@@ -111,9 +115,11 @@ npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展
 关键回归用例:
 
 - ECS 注入:**已有 OPT RR 时并入同一 OPT(ARCOUNT 不变、全报文仅 1 个 OPT)**,
-  这是对常见"重复 OPT RR"bug 的显式防护
-- 上游策略: 默认**不并发**、按序转移、全失败抛错;竞速模式取最快成功响应
-- 缓存四象限: GET/POST/含 ECS/负应答
+  这是对常见"重复 OPT RR"bug 的显式防护;`/no-ecs` **剥离已有 ECS**(仅 ECS 时整 OPT
+  移除、ARCOUNT-1;混其它 option 时保留并重建 RDLENGTH)
+- 上游策略: 默认**不并发**、按序转移、全失败抛错;竞速模式取最快成功响应;
+  响应必须**回显请求 ID/Question**(v4/v6 改写后按改写报文比较),超限/坏类型/坏 body 全部转移
+- 缓存四象限: GET/POST/含 ECS/负应答,外加无 SOA 负应答与 extended RCODE(BADVERS=16)不缓存
 - 客户端 IP: XFF 最右段(防伪造)、私网过滤、IPv6 解析
 
 ## 架构
@@ -121,21 +127,22 @@ npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展
 ```
 请求 → Hono 路由(/dns-query, /dns-query/auto_ecs, /dns-query/no_ecs,
                   /dns-query/{provider}, /dns-query-json, /health, /)
-  → 校验(方法/Accept/Content-Type/体积) → [可选 ECS 注入]
-  → 上游选择(轮询 → 顺序故障转移,或竞速) → fetch(3s 超时)
-  → 解析应答 TTL → Cache-Control → application/dns-message 响应
+  → 校验(方法/Accept/Content-Type/体积/QR/OPCODE/QDCOUNT) → [ECS 剥离|注入]
+  → 上游选择(轮询 → 顺序故障转移,或竞速) → fetch(3s 超时 + 响应校验/上限)
+  → 解析应答 TTL + extended RCODE → Cache-Control → application/dns-message 响应
 ```
 
 ```
 src/
 ├── config.ts          # 唯一配置源(环境变量解析 + 校验)
-├── upstream.ts        # 上游选择/故障转移/竞速 + 头过滤
+├── media.ts           # 媒体类型精确解析 + Accept q-value 协商
+├── upstream.ts        # 上游选择/故障转移/竞速 + 响应校验 + 头过滤
 ├── cache-control.ts   # RFC 8484 + TTL 感知缓存策略
 ├── errors.ts          # SERVFAIL 报文 / 文本错误
 ├── log.ts             # 调试日志(默认关闭)
 ├── dns/
-│   ├── wire.ts        # base64url、DNS 头/压缩指针/RR 遍历
-│   ├── ecs.ts         # ECS 检测 + 注入(并入既有 OPT)
+│   ├── wire.ts        # base64url、DNS 头/压缩指针/RR 遍历/extended RCODE
+│   ├── ecs.ts         # ECS 检测 + 注入(并入既有 OPT)+ 剥离(no-ecs)
 │   ├── ttl.ts         # 最小 TTL 提取
 │   ├── padding.ts     # RFC 8467 填充
 │   └── ip.ts          # IPv4/IPv6 解析 + 私网过滤

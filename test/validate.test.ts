@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { countOptRrs } from "../src/dns/wire";
 import { validateDnsResponse } from "../src/dns/validate";
-import { buildOptRr, buildQuery, buildResponse, concat } from "./helpers";
+import { buildOptRr, buildOptRrWithTtl, buildQuestion, buildQuery, buildResponse, concat } from "./helpers";
 
 describe("validateDnsResponse", () => {
   it("accepts a structurally valid response", () => {
@@ -42,6 +42,68 @@ describe("validateDnsResponse", () => {
   it("rejects truncated RR sections", () => {
     const resp = buildResponse(buildQuery(), { ttl: 300 });
     expect(validateDnsResponse(resp.subarray(0, resp.length - 2))).toBeNull();
+  });
+
+  it("rejects duplicate OPT RRs (RFC 6891)", () => {
+    const resp = buildResponse(buildQuery(), {
+      ttl: 300,
+      additional: concat([buildOptRr(new Uint8Array(0)), buildOptRr(new Uint8Array(0))]),
+    });
+    const view = new DataView(resp.buffer, resp.byteOffset, resp.byteLength);
+    view.setUint16(10, 2); // ARCOUNT = 2
+    expect(validateDnsResponse(resp)).toBeNull();
+  });
+
+  it("rejects an OPT RR whose owner name is not root (RFC 6891 §6.1.2)", () => {
+    const resp = buildResponse(buildQuery(), { ttl: 300 });
+    // Append a non-root-owner OPT RR manually: name "x" (3 bytes) + fixed 10.
+    const badOpt = new Uint8Array(3 + 10);
+    badOpt[0] = 3; // label length
+    badOpt[1] = 0x78; // "x"
+    badOpt[2] = 0; // root terminator
+    const view = new DataView(badOpt.buffer, badOpt.byteOffset, badOpt.byteLength);
+    view.setUint16(3, 41); // OPT
+    view.setUint16(5, 4096);
+    view.setUint32(7, 0);
+    view.setUint16(11, 0); // RDLENGTH
+    const withBadOpt = concat([resp, badOpt]);
+    new DataView(withBadOpt.buffer, withBadOpt.byteOffset, withBadOpt.byteLength).setUint16(10, 1);
+    expect(validateDnsResponse(withBadOpt)).toBeNull();
+  });
+
+  it("rejects an A answer whose RDATA length is wrong", () => {
+    const resp = buildResponse(buildQuery(), { ttl: 300, answerRdata: new Uint8Array([1, 2]) });
+    expect(validateDnsResponse(resp)).toBeNull();
+  });
+
+  it("returns the extended RCODE (BADVERS = 16)", () => {
+    const resp = buildResponse(buildQuery(), { ttl: 300, additional: buildOptRrWithTtl(0x01000000) });
+    expect(validateDnsResponse(resp)!.rcode).toBe(16);
+  });
+});
+
+describe("validateDnsResponse with the request message", () => {
+  it("accepts a response echoing the request ID + question", () => {
+    const query = buildQuery({ id: 0xbeef });
+    expect(validateDnsResponse(buildResponse(query, { ttl: 300 }), query)).not.toBeNull();
+  });
+
+  it("rejects a response with a mismatched ID", () => {
+    const query = buildQuery({ id: 0xbeef });
+    const resp = buildResponse(buildQuery({ id: 0x1234 }), { ttl: 300 });
+    expect(validateDnsResponse(resp, query)).toBeNull();
+  });
+
+  it("rejects a response with a mismatched question", () => {
+    const query = buildQuery();
+    const resp = buildResponse(buildQuery({ question: buildQuestion("evil.example") }), { ttl: 300 });
+    expect(validateDnsResponse(resp, query)).toBeNull();
+  });
+
+  it("rejects a response for a different QTYPE", () => {
+    const query = buildQuery();
+    const resp = buildResponse(buildQuery({ question: buildQuestion("example.com", 28) }), { ttl: 300 });
+    expect(validateDnsResponse(resp, query)).toBeNull();
   });
 });
 

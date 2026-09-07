@@ -8,7 +8,7 @@ import {
   resolveProvider,
   UpstreamError,
 } from "../src/upstream";
-import { buildQuery, buildResponse } from "./helpers";
+import { buildOptRrWithTtl, buildQuestion, buildQuery, buildResponse } from "./helpers";
 
 function config(overrides: Record<string, string> = {}) {
   return loadConfig({
@@ -85,7 +85,7 @@ describe("sequential failover (default, no broadcast)", () => {
       .mockRejectedValueOnce(new TypeError("network down"))
       .mockResolvedValueOnce(validResponse());
 
-    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery());
     expect(result.status).toBe(200);
     expect(result.body).toEqual(VALID_BODY);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -101,7 +101,7 @@ describe("sequential failover (default, no broadcast)", () => {
       .mockResolvedValueOnce(new Response("err", { status: 400 }))
       .mockResolvedValueOnce(validResponse());
 
-    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery());
     expect(result.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(3); // 503 and 400 failed over
   });
@@ -114,7 +114,7 @@ describe("sequential failover (default, no broadcast)", () => {
       .mockResolvedValueOnce(badBody())
       .mockResolvedValueOnce(validResponse());
 
-    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery());
     expect(result.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -122,7 +122,7 @@ describe("sequential failover (default, no broadcast)", () => {
   it("throws UpstreamError when every upstream fails", async () => {
     const cfg = config();
     vi.mocked(fetch).mockRejectedValue(new TypeError("down"));
-    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }))).rejects.toBeInstanceOf(
+    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery())).rejects.toBeInstanceOf(
       UpstreamError,
     );
   });
@@ -131,7 +131,7 @@ describe("sequential failover (default, no broadcast)", () => {
     const cfg = config();
     vi.mocked(fetch).mockRejectedValue(new TypeError("down"));
     await expect(
-      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } })),
+      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery()),
     ).rejects.toBeInstanceOf(UpstreamError);
     expect(vi.mocked(fetch).mock.calls.length).toBeLessThanOrEqual(3);
   });
@@ -146,7 +146,7 @@ describe("race mode", () => {
       return validResponse();
     });
 
-    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery());
     expect(result.status).toBe(200);
     expect(result.body).toEqual(VALID_BODY);
     expect(fetchMock.mock.calls.length).toBe(3); // raced all three
@@ -155,7 +155,7 @@ describe("race mode", () => {
   it("rejects when all upstreams return 5xx", async () => {
     const cfg = config({ RACE_UPSTREAMS: "true" });
     vi.mocked(fetch).mockResolvedValue(new Response("err", { status: 502 }));
-    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }))).rejects.toBeInstanceOf(
+    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery())).rejects.toBeInstanceOf(
       UpstreamError,
     );
   });
@@ -163,7 +163,7 @@ describe("race mode", () => {
   it("rejects when upstreams return invalid DNS bodies", async () => {
     const cfg = config({ RACE_UPSTREAMS: "true" });
     vi.mocked(fetch).mockResolvedValue(badBody());
-    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }))).rejects.toBeInstanceOf(
+    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery())).rejects.toBeInstanceOf(
       UpstreamError,
     );
   });
@@ -176,7 +176,7 @@ describe("redirect hardening", () => {
       expect((init as RequestInit).redirect).toBe("error");
       return validResponse();
     });
-    await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), buildQuery());
   });
 });
 
@@ -193,5 +193,92 @@ describe("buildUpstreamHeaders (allowlist)", () => {
     expect(headers.get("x-forwarded-for")).toBeNull();
     expect(headers.get("x-custom")).toBeNull();
     expect([...headers.keys()].sort()).toEqual(["accept", "content-type", "user-agent"]);
+  });
+});
+
+describe("upstream response hardening (review batch)", () => {
+  const REQUEST = buildQuery();
+
+  it("accepts a Content-Type with parameters (charset etc.)", async () => {
+    const cfg = config();
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(VALID_BODY, {
+        status: 200,
+        headers: { "content-type": "application/dns-message; charset=utf-8" },
+      }),
+    );
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST);
+    expect(result.status).toBe(200);
+  });
+
+  it("rejects a Content-Type that merely PREFIXES dns-message (fails over)", async () => {
+    const cfg = config();
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(VALID_BODY, {
+        status: 200,
+        headers: { "content-type": "application/dns-messageevil" },
+      }),
+    );
+    await expect(
+      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST),
+    ).rejects.toBeInstanceOf(UpstreamError);
+    expect(vi.mocked(fetch).mock.calls.length).toBe(3); // tried every upstream
+  });
+
+  it("rejects an oversized response via Content-Length (fails over)", async () => {
+    const cfg = config();
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(VALID_BODY, {
+        status: 200,
+        headers: { "content-type": "application/dns-message", "content-length": "70000" },
+      }),
+    );
+    await expect(
+      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST),
+    ).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it("rejects a response whose question does not echo the request (fails over)", async () => {
+    const cfg = config();
+    const mismatched = buildResponse(buildQuery({ question: buildQuestion("evil.example") }), { ttl: 300 });
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(mismatched, { status: 200, headers: { "content-type": "application/dns-message" } }),
+    );
+    await expect(
+      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST),
+    ).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it("rejects a response whose ID does not match the request (fails over)", async () => {
+    const cfg = config();
+    const wrongId = buildResponse(buildQuery({ id: 0x9999 }), { ttl: 300 });
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(wrongId, { status: 200, headers: { "content-type": "application/dns-message" } }),
+    );
+    await expect(
+      queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST),
+    ).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it("exposes the extended RCODE (BADVERS = 16) on the validated result", async () => {
+    const cfg = config();
+    const badvers = buildResponse(REQUEST, { ttl: 300, additional: buildOptRrWithTtl(0x01000000) });
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(badvers, { status: 200, headers: { "content-type": "application/dns-message" } }),
+    );
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), REQUEST);
+    expect(result.rcode).toBe(16);
+  });
+
+  it("matches the response against the REWRITTEN request (v4/v6 question change)", async () => {
+    const cfg = config();
+    // Request rewritten to AAAA by the route; upstream must echo the new QTYPE.
+    const rewritten = buildQuery({ question: buildQuestion("example.com", 28) });
+    const echo = buildResponse(rewritten, { ttl: 300 });
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(echo, { status: 200, headers: { "content-type": "application/dns-message" } }),
+    );
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), rewritten);
+    expect(result.status).toBe(200);
   });
 });

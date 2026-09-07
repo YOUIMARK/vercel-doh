@@ -12,6 +12,7 @@
 // INSIDE this layer. The caller only ever receives a validated DNS payload.
 
 import type { DoHConfig } from "./config.js";
+import { parseMediaType } from "./media.js";
 import { validateDnsResponse } from "./dns/validate.js";
 import { debugLog } from "./log.js";
 
@@ -21,6 +22,8 @@ export class UpstreamError extends Error {}
 export interface UpstreamDnsResult {
   body: Uint8Array<ArrayBuffer>;
   status: number;
+  /** Full RCODE (incl. EDNS extended-rcode bits), from the validated response. */
+  rcode: number;
 }
 
 export interface UpstreamRequest {
@@ -64,48 +67,66 @@ export function resetCursor(): void {
 /**
  * Runs the configured strategy over `urls`. Resolves with the first validated
  * DNS response, rejects with UpstreamError when all attempts fail.
+ * `requestMessage` is the exact message sent upstream (after ECS/QTYPE
+ * modification); the winning response must echo its ID + question.
  */
 export async function queryUpstreams(
   config: DoHConfig,
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
+  requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   if (urls.length === 0) throw new UpstreamError("no upstream configured");
   if (config.raceUpstreams && urls.length > 1) {
-    return raceUpstreams(urls, buildRequest, config.upstreamTimeoutMs);
+    return raceUpstreams(config, urls, buildRequest, requestMessage);
   }
-  return sequentialFailover(config, urls, buildRequest);
+  return sequentialFailover(config, urls, buildRequest, requestMessage);
 }
 
 /**
  * Performs one upstream request and returns a validated, fully-read response.
  * Rejects on: network error/timeout, redirect, non-2xx status, wrong
- * Content-Type, or structurally invalid DNS payload — all treated as failures
- * that trigger failover.
+ * Content-Type, oversized body, or an invalid/mismatched DNS payload — all
+ * treated as failures that trigger failover.
  */
 async function fetchValidated(
+  config: DoHConfig,
   url: string,
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   signal: AbortSignal,
+  requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   const { url: fetchUrl, init } = buildRequest(url, signal);
   const res = await fetch(fetchUrl, { ...init, redirect: "error" }); // SSRF: never follow redirects
   if (!res.ok) throw new UpstreamError(`upstream ${fetchUrl} -> ${res.status}`);
-  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-  if (!contentType.includes("application/dns-message")) {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (parseMediaType(contentType) !== "application/dns-message") {
     throw new UpstreamError(`upstream ${fetchUrl} -> unexpected content-type ${contentType}`);
   }
+  // Reject oversized responses up front (Content-Length) and after reading.
+  const contentLength = res.headers.get("content-length");
+  if (contentLength !== null) {
+    const n = Number.parseInt(contentLength, 10);
+    if (!Number.isNaN(n) && n > config.maxBodyBytes) {
+      throw new UpstreamError(`upstream ${fetchUrl} -> response too large (${n} bytes)`);
+    }
+  }
   const body = new Uint8Array(await res.arrayBuffer());
-  if (!validateDnsResponse(body)) {
+  if (body.length > config.maxBodyBytes) {
+    throw new UpstreamError(`upstream ${fetchUrl} -> response too large (${body.length} bytes)`);
+  }
+  const validated = validateDnsResponse(body, requestMessage);
+  if (!validated) {
     throw new UpstreamError(`upstream ${fetchUrl} -> invalid DNS response`);
   }
-  return { body, status: res.status };
+  return { body, status: res.status, rcode: validated.rcode };
 }
 
 async function sequentialFailover(
   config: DoHConfig,
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
+  requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   const attempts = Math.min(config.maxAttempts, urls.length);
   const start = cursor % urls.length;
@@ -116,7 +137,7 @@ async function sequentialFailover(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
     try {
-      const result = await fetchValidated(url, buildRequest, controller.signal);
+      const result = await fetchValidated(config, url, buildRequest, controller.signal, requestMessage);
       debugLog(`upstream ${url} -> ${result.status}`);
       return result;
     } catch (err) {
@@ -129,17 +150,18 @@ async function sequentialFailover(
 }
 
 async function raceUpstreams(
+  config: DoHConfig,
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
-  timeoutMs: number,
+  requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
   try {
     // Body is read (and validated) inside each attempt, so aborting the losers
     // after the winner resolves can never abort an unread winner body.
     const attempts = urls.map(async (url) => {
-      const result = await fetchValidated(url, buildRequest, controller.signal);
+      const result = await fetchValidated(config, url, buildRequest, controller.signal, requestMessage);
       debugLog(`race: ${url} -> ${result.status}`);
       return result;
     });

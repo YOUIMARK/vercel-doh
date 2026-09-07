@@ -61,12 +61,20 @@ export function buildQuery(opts: QueryOptions = {}): Uint8Array<ArrayBuffer> {
 
 /** Builds an OPT RR (type 41) with the given option bytes. */
 export function buildOptRr(optionBytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  return buildOptRrWithTtl(0, optionBytes);
+}
+
+/** Builds an OPT RR with an explicit 32-bit TTL field (extended RCODE / version / DO / Z, RFC 6891 §6.1.3). */
+export function buildOptRrWithTtl(
+  ttl: number,
+  optionBytes: Uint8Array<ArrayBuffer> = new Uint8Array(0),
+): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(11 + optionBytes.length);
   const view = toView(out);
   out[0] = 0; // root name
   view.setUint16(1, 41); // OPT
   view.setUint16(3, 4096); // UDP payload
-  view.setUint32(5, 0); // TTL
+  view.setUint32(5, ttl); // extended RCODE (byte 0) / version (byte 1) / DO (byte 2) / Z (byte 3)
   view.setUint16(9, optionBytes.length);
   out.set(optionBytes, 11);
   return out;
@@ -116,6 +124,8 @@ export interface ResponseOptions {
   ttl?: number;
   authorityTtl?: number;
   answerCount?: number;
+  /** Answer RR type (defaults to A). */
+  answerType?: number;
   answerRdata?: Uint8Array<ArrayBuffer>;
   authorityRdata?: Uint8Array<ArrayBuffer>;
   soaMinimum?: number;
@@ -133,7 +143,7 @@ export function buildResponse(query: Uint8Array<ArrayBuffer>, opts: ResponseOpti
   const answerCount = opts.answerCount ?? 1;
   const an: Uint8Array<ArrayBuffer>[] = [];
   for (let i = 0; i < answerCount; i++) {
-    an.push(buildRR(1, opts.ttl ?? 300, opts.answerRdata ?? new Uint8Array([1, 2, 3, 4])));
+    an.push(buildRR(opts.answerType ?? 1, opts.ttl ?? 300, opts.answerRdata ?? new Uint8Array([1, 2, 3, 4])));
   }
   const ns: Uint8Array<ArrayBuffer>[] = [];
   if (opts.authorityTtl !== undefined) {

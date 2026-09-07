@@ -1,20 +1,23 @@
 // Cache-Control strategy (RFC 8484 §5 + RFC 2308 negative caching).
 //
 //   NOERROR + Answer        -> public, s-maxage=<min answer TTL capped>
-//   NXDOMAIN / NODATA       -> public, s-maxage=<RFC 2308 negative TTL capped>
-//   SERVFAIL / REFUSED / FORMERR / other RCODE -> no-store (never cache failures)
+//   NXDOMAIN / NODATA + SOA -> public, s-maxage=<RFC 2308 negative TTL capped>
+//   NXDOMAIN / NODATA w/o SOA -> no-store (RFC 2308: no SOA, no safe TTL)
+//   SERVFAIL / REFUSED / FORMERR / other RCODE (incl. extended) -> no-store
 //   POST / ECS-sensitive / invalid response   -> no-store
 //
 // Rationale: a shared cache (Vercel CDN) reuses these responses across
 // invocations, so anything client-specific (ECS) or transiently wrong
-// (SERVFAIL) must never be cached publicly.
+// (SERVFAIL) must never be cached publicly. Negative responses without a
+// usable SOA MINIMUM cannot be given a safe TTL, so they are not cached.
 
 export interface CacheControlInput {
   method: string;
   /** Whether the upstream response passed DNS validation. */
   validResponse: boolean;
+  /** Full RCODE, including EDNS(0) extended-rcode bits (BADVERS = 16, …). */
   rcode: number;
-  /** True when the request carried ECS or the proxy injected ECS. */
+  /** True when the request carried ECS, the proxy injected ECS, or the response carries ECS. */
   ecsSensitive: boolean;
   /** Minimum ANSWER-section TTL (positive answers only). */
   minAnswerTtl: number | null;
@@ -30,10 +33,15 @@ export function buildCacheControl(input: CacheControlInput): string {
   const cacheable = input.rcode === 0 || input.rcode === 3;
   if (!cacheable) return "no-store";
 
-  const ttl =
-    input.rcode === 0 && input.minAnswerTtl !== null
-      ? input.minAnswerTtl
-      : (input.negativeTtl ?? 60);
+  let ttl: number | null = null;
+  if (input.rcode === 0 && input.minAnswerTtl !== null) {
+    ttl = input.minAnswerTtl;
+  } else if (input.negativeTtl !== null) {
+    ttl = input.negativeTtl; // RFC 2308: min(SOA TTL, SOA.MINIMUM)
+  }
+  // NXDOMAIN/NODATA without a usable SOA → no safe negative TTL → no-store.
+  if (ttl === null) return "no-store";
+
   const capped = Math.max(0, Math.min(ttl, input.cacheMaxAge));
   return `public, s-maxage=${capped}, stale-while-revalidate=60`;
 }

@@ -31,7 +31,15 @@ export function rcodeOf(flags: number): number {
   return flags & 0x0f;
 }
 
-/** Skips a (possibly compressed) domain name. Returns the offset after the name, or -1 if malformed. */
+/**
+ * Skips a (possibly compressed) domain name. Returns the offset after the name, or -1 if malformed.
+ *
+ * Compression pointers (RFC 1035 §4.1.4) are consumed but never dereferenced
+ * (callers only need the name boundary). The pointer TARGET is still
+ * validated: it must point to a prior occurrence inside the message and never
+ * into the 12-byte header — a dangling or forward pointer is malformed input,
+ * not a valid name.
+ */
 export function skipName(view: DataView, offset: number): number {
   let o = offset;
   while (o < view.byteLength) {
@@ -39,7 +47,10 @@ export function skipName(view: DataView, offset: number): number {
     if (len === 0) return o + 1;
     if ((len & 0xc0) === 0xc0) {
       // Compression pointer: consumes 2 bytes and ends the name.
-      return o + 2 <= view.byteLength ? o + 2 : -1;
+      if (o + 2 > view.byteLength) return -1;
+      const target = ((len & 0x3f) << 8) | view.getUint8(o + 1);
+      if (target < 12 || target >= o) return -1; // must point back into the message, never into the header
+      return o + 2;
     }
     if ((len & 0xc0) !== 0) return -1; // reserved label types 01/10
     if (o + 1 + len > view.byteLength) return -1;
@@ -49,6 +60,8 @@ export function skipName(view: DataView, offset: number): number {
 }
 
 export interface RRInfo {
+  /** Offset of the RR's owner name start. */
+  nameStart: number;
   /** Offset of the RR's fixed fields (after the name). */
   offset: number;
   rrType: number;
@@ -64,6 +77,14 @@ export interface ScanResult {
   rrs: RRInfo[];
 }
 
+export interface ParsedSections {
+  header: DnsHeader;
+  questionEnd: number;
+  answers: ScanResult;
+  authority: ScanResult;
+  additional: ScanResult;
+}
+
 /**
  * Scans `count` resource records starting at `offset`.
  * Returns null on malformed/truncated input.
@@ -72,6 +93,7 @@ export function scanRRs(view: DataView, offset: number, count: number): ScanResu
   let o = offset;
   const rrs: RRInfo[] = [];
   for (let i = 0; i < count; i++) {
+    const nameStart = o;
     const afterName = skipName(view, o);
     if (afterName === -1) return null;
     if (afterName + 10 > view.byteLength) return null; // TYPE(2) CLASS(2) TTL(4) RDLENGTH(2)
@@ -81,7 +103,7 @@ export function scanRRs(view: DataView, offset: number, count: number): ScanResu
     const rdLength = view.getUint16(afterName + 8);
     const rdataOffset = afterName + 10;
     if (rdataOffset + rdLength > view.byteLength) return null;
-    rrs.push({ offset: afterName, rrType, rrClass, ttl, rdLength, rdataOffset });
+    rrs.push({ nameStart, offset: afterName, rrType, rrClass, ttl, rdLength, rdataOffset });
     o = rdataOffset + rdLength;
   }
   return { nextOffset: o, rrs };
@@ -91,7 +113,7 @@ export function scanRRs(view: DataView, offset: number, count: number): ScanResu
  * Walks the header + question + all sections.
  * Returns { questionEnd, answers, authority, additional } or null if malformed.
  */
-export function parseSections(msg: Uint8Array) {
+export function parseSections(msg: Uint8Array): ParsedSections | null {
   const header = parseHeader(msg);
   if (!header) return null;
   const view = toView(msg);
@@ -196,4 +218,100 @@ export function buildErrorResponse(query: Uint8Array<ArrayBuffer> | null, rcode:
   view.setUint16(10, 0);
   out.set(questionBytes, 12);
   return out;
+}
+
+/**
+ * Full RCODE of a DNS message: low 4 bits of the flags word plus the EDNS(0)
+ * extended-rcode (top 8 bits of the OPT TTL field, RFC 6891 §6.1.3), i.e.
+ * `(extended << 4) | low`. Without an OPT RR this equals `flags & 0x0f`.
+ * A BADVERS response (extended=1, low=0) therefore reads as 16, not 0 — so
+ * cache policy can never mistake an extended error for NOERROR.
+ */
+export function extendedRcode(msg: Uint8Array): number {
+  const parsed = parseSections(msg);
+  const low = parsed ? parsed.header.flags & 0x0f : 0;
+  if (!parsed) return low;
+  const view = toView(msg);
+  for (const rr of parsed.additional.rrs) {
+    if (rr.rrType !== 41) continue;
+    const optTtl = view.getUint32(rr.offset + 4);
+    return (((optTtl >>> 24) & 0xff) << 4) | low;
+  }
+  return low;
+}
+
+/**
+ * Type-specific RDATA structural checks (defense in depth): fixed-length
+ * types must carry exactly their wire size and name-bearing types must parse
+ * to the exact end of their RDATA. Unknown types are skipped — their bounds
+ * are already enforced by scanRRs. OPT (type 41) is skipped: its RDATA is
+ * EDNS options, validated separately.
+ */
+export function checkRdataTypes(view: DataView, parsed: ParsedSections): boolean {
+  const rrs = [...parsed.answers.rrs, ...parsed.authority.rrs, ...parsed.additional.rrs];
+  for (const rr of rrs) {
+    if (rr.rrType === 41) continue;
+    const end = rr.rdataOffset + rr.rdLength;
+    switch (rr.rrType) {
+      case 1: // A
+        if (rr.rdLength !== 4) return false;
+        break;
+      case 28: // AAAA
+        if (rr.rdLength !== 16) return false;
+        break;
+      case 2: // NS
+      case 5: // CNAME
+      case 12: // PTR
+      case 39: // DNAME
+        if (skipName(view, rr.rdataOffset) !== end) return false;
+        break;
+      case 15: {
+        // MX: 2-byte preference + a name
+        if (rr.rdLength < 3) return false;
+        if (skipName(view, rr.rdataOffset + 2) !== end) return false;
+        break;
+      }
+      case 6: {
+        // SOA: MNAME + RNAME + 5 × uint32
+        if (rr.rdLength < 22) return false;
+        const afterMname = skipName(view, rr.rdataOffset);
+        if (afterMname === -1 || afterMname >= end) return false;
+        const afterRname = skipName(view, afterMname);
+        if (afterRname === -1 || afterRname + 20 !== end) return false;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+/** Self-contained wrapper of checkRdataTypes (parses the message itself). */
+export function rdataStructurallyValid(msg: Uint8Array): boolean {
+  const parsed = parseSections(msg);
+  if (!parsed) return false;
+  return checkRdataTypes(toView(msg), parsed);
+}
+
+/**
+ * Whether `response` echoes `request`'s ID and question section (RFC 1035
+ * §4.1.2: the response question echoes the query question). `request` must be
+ * the exact message that was sent upstream — after ECS stripping and any v4/v6
+ * QTYPE rewrite — so the comparison matches the modified question.
+ */
+export function questionMatches(response: Uint8Array, request: Uint8Array): boolean {
+  const rh = parseHeader(response);
+  const qh = parseHeader(request);
+  if (!rh || !qh) return false;
+  if (rh.id !== qh.id) return false;
+  if (rh.qd !== 1 || qh.qd !== 1) return false;
+  const rs = parseSections(response);
+  const qs = parseSections(request);
+  if (!rs || !qs) return false;
+  if (rs.questionEnd !== qs.questionEnd) return false;
+  for (let i = 12; i < rs.questionEnd; i++) {
+    if (response[i] !== request[i]) return false;
+  }
+  return true;
 }

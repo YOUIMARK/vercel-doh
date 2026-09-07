@@ -3,7 +3,7 @@ import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { buildEcsOption, ecsStatus } from "../src/dns/ecs";
 import { encodeBase64Url, parseHeader, parseSections, questionType, rcodeOf } from "../src/dns/wire";
-import { buildOptRr, buildQuery, buildResponse, buildQuestion, concat } from "./helpers";
+import { buildOptRr, buildOptRrWithTtl, buildQuery, buildResponse, buildQuestion, concat } from "./helpers";
 
 const UPSTREAM = "https://up.example/dns-query";
 
@@ -38,6 +38,34 @@ function validUpstream(
     additional: opts.additional,
   });
   return new Response(body, { status: 200, headers: { "content-type": "application/dns-message" } });
+}
+
+/**
+ * Mocks fetch to echo the EXACT message that was sent upstream (handles v4/v6
+ * QTYPE rewrites and ECS changes): the response must echo the modified
+ * question for the route's question-match validation to pass.
+ */
+function upstreamEcho(
+  opts: {
+    ttl?: number;
+    rcode?: number;
+    answerCount?: number;
+    authorityTtl?: number;
+    soaMinimum?: number;
+    additional?: Uint8Array<ArrayBuffer>;
+  } = {},
+) {
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const url = new URL(String(input));
+    const dns = url.searchParams.get("dns");
+    let message: Uint8Array<ArrayBuffer>;
+    if (dns) {
+      message = new Uint8Array(Buffer.from(dns.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    } else {
+      message = (init as RequestInit).body as Uint8Array<ArrayBuffer>;
+    }
+    return validUpstream(message, opts);
+  });
 }
 
 beforeEach(() => {
@@ -288,7 +316,7 @@ describe("CORS / aux endpoints", () => {
 
   it("serves dns-json for the JSON API", async () => {
     vi.mocked(fetch).mockResolvedValue(
-      new Response(JSON.stringify({ Status: 0, Answer: [{ data: "1.2.3.4" }] }), {
+      new Response(JSON.stringify({ Status: 0, Answer: [{ data: "1.2.3.4", TTL: 300 }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -375,7 +403,12 @@ describe("dns-json URL flags", () => {
   });
 
   it("/no-ecs strips a client-provided edns_client_subnet (privacy, cacheable)", async () => {
-    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0, Answer: [{ data: "1.2.3.4", TTL: 300 }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     const res = await makeApp().request(
       "/dns-query-json/no-ecs?name=example.com&type=A&edns_client_subnet=1.2.3.0/24",
       { headers: { accept: "application/dns-json" } },
@@ -597,7 +630,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
 
   it("/v4 rewrites AAAA questions to A", async () => {
     const app = makeApp();
-    vi.mocked(fetch).mockResolvedValue(validUpstream(aaaaQuery, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
     const res = await app.request(`/dns-query/v4?dns=${encodeBase64Url(aaaaQuery)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
     expect(questionType(forwardedQuery(0).message)).toBe(1); // A
@@ -606,7 +639,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
   it("/v6 rewrites A questions to AAAA", async () => {
     const app = makeApp();
     const query = buildQuery(); // qtype A
-    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
     const res = await app.request(`/dns-query/v6?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
     expect(questionType(forwardedQuery(0).message)).toBe(28); // AAAA
@@ -615,7 +648,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
   it("/v6 leaves non-address types (MX) untouched", async () => {
     const app = makeApp();
     const mxQuery = buildQuery({ question: buildQuestion("example.com", 15) });
-    vi.mocked(fetch).mockResolvedValue(validUpstream(mxQuery, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
     const res = await app.request(`/dns-query/v6?dns=${encodeBase64Url(mxQuery)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
     expect(questionType(forwardedQuery(0).message)).toBe(15);
@@ -624,7 +657,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
   it("URL flag overrides UPSTREAM_FAMILY env", async () => {
     const app = makeApp({ UPSTREAM_FAMILY: "v6" });
     const query = buildQuery();
-    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
     const res = await app.request(`/dns-query/v4?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
     expect(questionType(forwardedQuery(0).message)).toBe(1); // v4 wins over env v6
@@ -633,7 +666,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
   it("env UPSTREAM_FAMILY applies when no URL flag is present", async () => {
     const app = makeApp({ UPSTREAM_FAMILY: "v6" });
     const query = buildQuery();
-    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
     const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
     expect(questionType(forwardedQuery(0).message)).toBe(28);
@@ -654,7 +687,7 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
   it("combines flags: /v6/ecs forces AAAA AND injects ECS", async () => {
     const app = makeApp();
     const query = buildQuery();
-    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+    upstreamEcho({ ttl: 60 });
 
     const res = await app.request("/dns-query/v6/ecs", {
       method: "POST",
@@ -836,5 +869,187 @@ describe("DOH_PATH obfuscation", () => {
     expect(res.status).toBe(200);
     const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
     expect(ecsStatus(sent.body as Uint8Array)).toBe("positive");
+  });
+});
+
+describe("protocol boundary hardening (external review batch)", () => {
+  const v4ip = { family: 1 as const, addressBytes: new Uint8Array([1, 2, 3, 4]) };
+
+  it("rejects a QR=1 'response' sent as a query (400, no upstream call)", async () => {
+    const app = makeApp();
+    const respLike = buildQuery();
+    new DataView(respLike.buffer, respLike.byteOffset, respLike.byteLength).setUint16(2, 0x8100); // QR=1
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(respLike)}`, { headers: acceptMessage });
+    expect(res.status).toBe(400);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-standard opcode query (400, no upstream call)", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    new DataView(query.buffer, query.byteOffset, query.byteLength).setUint16(2, 0x0800 | 0x0100); // OPCODE=1 (IQUERY)
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(400);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("/no-ecs strips a client-provided ECS on the BINARY path (cacheable after strip)", async () => {
+    const app = makeApp();
+    const ecsQuery = buildQuery({ additional: buildOptRr(buildEcsOption(v4ip, 24)) });
+    expect(ecsStatus(ecsQuery)).toBe("positive");
+    upstreamEcho({ ttl: 300 });
+
+    const res = await app.request(`/dns-query/no-ecs?dns=${encodeBase64Url(ecsQuery)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(ecsStatus(forwardedQuery(0).message)).toBe("absent"); // ECS stripped, not merely not-injected
+    expect(res.headers.get("cache-control")).toContain("s-maxage=300"); // no longer ECS-sensitive
+  });
+
+  it("fails over (SERVFAIL) when the upstream response question does not match", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(
+      validUpstream(buildQuery({ question: buildQuestion("evil.example") }), { ttl: 300 }),
+    );
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(rcodeOf(parseHeader(new Uint8Array(await res.arrayBuffer()))!.flags)).toBe(2); // SERVFAIL
+  });
+
+  it("fails over (SERVFAIL) when the upstream response ID does not match", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(
+      validUpstream(buildQuery({ id: 0x9999 }), { ttl: 300 }),
+    );
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(rcodeOf(parseHeader(new Uint8Array(await res.arrayBuffer()))!.flags)).toBe(2);
+  });
+
+  it("does not cache an upstream response with an extended RCODE (BADVERS = 16)", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(
+      validUpstream(query, { ttl: 300, additional: buildOptRrWithTtl(0x01000000) }),
+    );
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("does not cache an upstream response that carries ECS when the request had none", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(
+      validUpstream(query, { ttl: 300, additional: buildOptRr(buildEcsOption(v4ip, 24)) }),
+    );
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("accepts POST with a parameterized Content-Type", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    upstreamEcho({ ttl: 60 });
+    const res = await app.request("/dns-query", {
+      method: "POST",
+      headers: { ...acceptMessage, "content-type": "application/dns-message; charset=utf-8" },
+      body: query,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects POST Content-Types that merely prefix dns-message (415)", async () => {
+    const res = await makeApp().request("/dns-query", {
+      method: "POST",
+      headers: { ...acceptMessage, "content-type": "application/dns-messageevil" },
+      body: "x",
+    });
+    expect(res.status).toBe(415);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("returns 406 when Accept excludes dns-message via q=0", async () => {
+    const query = buildQuery();
+    const res = await makeApp().request(`/dns-query?dns=${encodeBase64Url(query)}`, {
+      headers: { accept: "application/dns-message;q=0, */*;q=1" },
+    });
+    expect(res.status).toBe(406);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("fails over (SERVFAIL) when the upstream response is oversized", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(buildResponse(query, { ttl: 300 }), {
+        status: 200,
+        headers: { "content-type": "application/dns-message", "content-length": "70000" },
+      }),
+    );
+    const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(rcodeOf(parseHeader(new Uint8Array(await res.arrayBuffer()))!.flags)).toBe(2);
+  });
+
+  it("returns 502 when a JSON upstream returns a non-JSON 200 body", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response("not json at all", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it("returns 502 when a JSON upstream returns a wrong schema", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: "nope" }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it("sizes the JSON cache from the answer TTL (TTL 30 → s-maxage=30)", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0, Answer: [{ data: "1.2.3.4", TTL: 30 }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=30, stale-while-revalidate=60");
+  });
+
+  it("caches JSON NXDOMAIN from the authority TTL", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 3, Authority: [{ data: "soa-rdata", TTL: 120 }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("s-maxage=120");
+  });
+
+  it("does not cache JSON NXDOMAIN without any TTL information", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 3 }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
   });
 });

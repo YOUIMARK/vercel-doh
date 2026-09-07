@@ -36,9 +36,15 @@ describe("buildCacheControl — negative answers (RFC 2308)", () => {
     );
   });
 
-  it("falls back to a conservative 60s when no SOA is present", () => {
+  it("NXDOMAIN without a usable SOA → no-store (RFC 2308: no safe TTL)", () => {
     expect(buildCacheControl({ ...base, rcode: 3, minAnswerTtl: null, negativeTtl: null })).toBe(
-      "public, s-maxage=60, stale-while-revalidate=60",
+      "no-store",
+    );
+  });
+
+  it("NODATA (NOERROR, no answers) without a usable SOA → no-store", () => {
+    expect(buildCacheControl({ ...base, rcode: 0, minAnswerTtl: null, negativeTtl: null })).toBe(
+      "no-store",
     );
   });
 });

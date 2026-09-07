@@ -38,6 +38,8 @@ export function ecsStatus(msg: Uint8Array): EcsStatus {
 
   for (const opt of parsed.additional.rrs) {
     if (opt.rrType !== OPT_RR_TYPE) continue;
+    // RFC 6891 §6.1.2: the OPT owner name MUST be the root domain.
+    if (opt.offset - opt.nameStart !== 1 || msg[opt.nameStart] !== 0) return "malformed";
     const end = opt.rdataOffset + opt.rdLength;
     let o = opt.rdataOffset;
     while (o + 4 <= end) {
@@ -124,6 +126,67 @@ export function addOrMergeEcs(
   out.set(ecsOption, o + 10);
   // ARCOUNT + 1
   view.setUint16(10, parsed.header.ar + 1);
+  return out;
+}
+
+/**
+ * Removes any ECS option from the message (privacy: `/no-ecs` must STRIP a
+ * client-provided subnet, not merely skip injection):
+ *  - when the OPT RR still carries other options, its RDATA is rebuilt
+ *    (RDLENGTH updated, ARCOUNT unchanged);
+ *  - when the OPT RDATA becomes empty, the whole OPT RR is removed and
+ *    ARCOUNT is decremented (an OPT RR with no options is useless).
+ * Returns the original message when there is no ECS to remove or the input is
+ * malformed (callers validate the message first).
+ */
+export function removeEcsOption(msg: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  const parsed = parseSections(msg);
+  if (!parsed) return msg;
+  const opt = parsed.additional.rrs.find((rr) => rr.rrType === OPT_RR_TYPE);
+  if (!opt) return msg;
+  const view = toView(msg);
+  const end = opt.rdataOffset + opt.rdLength;
+  const kept: Uint8Array[] = [];
+  let sawEcs = false;
+  let o = opt.rdataOffset;
+  while (o + 4 <= end) {
+    const code = view.getUint16(o);
+    const len = view.getUint16(o + 2);
+    if (o + 4 + len > end) return msg; // malformed option → leave untouched
+    if (code === ECS_OPTION_CODE) sawEcs = true;
+    else kept.push(msg.subarray(o, o + 4 + len));
+    o += 4 + len;
+  }
+  if (o !== end) return msg; // truncated option header → leave untouched
+  if (!sawEcs) return msg;
+
+  if (kept.length > 0) {
+    const keptBytes = concatBytes(kept);
+    const out = new Uint8Array(msg.length - opt.rdLength + keptBytes.length);
+    out.set(msg.subarray(0, opt.rdataOffset), 0);
+    out.set(keptBytes, opt.rdataOffset);
+    out.set(msg.subarray(end), opt.rdataOffset + keptBytes.length);
+    toView(out).setUint16(opt.rdataOffset - 2, keptBytes.length); // new RDLENGTH
+    return out;
+  }
+
+  // No options left: drop the entire OPT RR and decrement ARCOUNT.
+  const rrStart = opt.nameStart;
+  const out = new Uint8Array(msg.length - (end - rrStart));
+  out.set(msg.subarray(0, rrStart), 0);
+  out.set(msg.subarray(end), rrStart);
+  toView(out).setUint16(10, parsed.header.ar - 1);
+  return out;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const total = chunks.reduce((acc, c) => acc + c.length, 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
   return out;
 }
 

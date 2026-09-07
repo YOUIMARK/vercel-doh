@@ -4,6 +4,7 @@ import {
   buildEcsOption,
   ecsStatus,
   parseClientIp,
+  removeEcsOption,
 } from "../src/dns/ecs";
 import { countOptRrs, parseHeader, parseSections } from "../src/dns/wire";
 import { buildOptRr, buildQuery, concat } from "./helpers";
@@ -74,6 +75,74 @@ describe("ecsStatus", () => {
     const msg = buildQuery({ additional: concat([buildOptRr(new Uint8Array(0)), buildOptRr(new Uint8Array(0))]), ar: 2 });
     expect(countOptRrs(msg)).toBe(2);
     expect(ecsStatus(msg)).toBe("malformed");
+  });
+
+  it("returns malformed when an OPT owner name is not root", () => {
+    const badOpt = new Uint8Array(3 + 10);
+    badOpt[0] = 3;
+    badOpt[1] = 0x78;
+    badOpt[2] = 0;
+    const view = new DataView(badOpt.buffer, badOpt.byteOffset, badOpt.byteLength);
+    view.setUint16(3, 41);
+    view.setUint16(5, 4096);
+    view.setUint32(7, 0);
+    view.setUint16(11, 0);
+    expect(ecsStatus(buildQuery({ additional: badOpt }))).toBe("malformed");
+  });
+});
+
+describe("removeEcsOption (/no-ecs privacy strip)", () => {
+  it("returns the original message when there is no ECS", () => {
+    const msg = buildQuery();
+    expect(removeEcsOption(msg)).toBe(msg);
+    const nsidOpt = buildOptRr(new Uint8Array([0, 3, 0, 2, 65, 65]));
+    const noEcs = buildQuery({ additional: nsidOpt });
+    expect(removeEcsOption(noEcs)).toBe(noEcs);
+  });
+
+  it("removes the whole OPT RR when it carried only ECS (ARCOUNT -1)", () => {
+    const msg = buildQuery({ additional: buildOptRr(buildEcsOption(IP_V4, 24)) });
+    const stripped = removeEcsOption(msg);
+    expect(ecsStatus(stripped)).toBe("absent");
+    expect(parseHeader(stripped)!.ar).toBe(0);
+    expect(countOptRrsIn(stripped)).toBe(0);
+    // Header (except ARCOUNT) and the question section are untouched.
+    expect(stripped.subarray(0, 10)).toEqual(msg.subarray(0, 10));
+    const strippedSections = parseSections(stripped)!;
+    const msgSections = parseSections(msg)!;
+    expect(stripped.subarray(12, strippedSections.questionEnd)).toEqual(
+      msg.subarray(12, msgSections.questionEnd),
+    );
+  });
+
+  it("keeps other options inside the OPT RR (RDLENGTH updated, ARCOUNT unchanged)", () => {
+    // OPT RDATA carrying NSID "AA" + an ECS option.
+    const ecsOpt = buildOptRr(concat([new Uint8Array([0, 3, 0, 2, 65, 65]), buildEcsOption(IP_V4, 24)]));
+    const msg = buildQuery({ additional: ecsOpt });
+    expect(ecsStatus(msg)).toBe("positive");
+
+    const stripped = removeEcsOption(msg);
+    expect(ecsStatus(stripped)).toBe("absent"); // ECS gone
+    expect(parseHeader(stripped)!.ar).toBe(1); // OPT kept
+    expect(countOptRrsIn(stripped)).toBe(1);
+
+    // NSID option must still be present.
+    const sections = parseSections(stripped)!;
+    const opt = sections.additional.rrs.find((rr) => rr.rrType === 41)!;
+    const view = new DataView(stripped.buffer, stripped.byteOffset, stripped.byteLength);
+    const codes: number[] = [];
+    let o = opt.rdataOffset;
+    const end = opt.rdataOffset + opt.rdLength;
+    while (o + 4 <= end) {
+      codes.push(view.getUint16(o));
+      o += 4 + view.getUint16(o + 2);
+    }
+    expect(codes).toEqual([3]); // NSID only
+  });
+
+  it("returns the original message on malformed input", () => {
+    const truncated = new Uint8Array([0, 0]);
+    expect(removeEcsOption(truncated)).toBe(truncated);
   });
 });
 

@@ -1,6 +1,7 @@
 // Google-style dns-json API (for the browser query tool).
 // Same trust boundary as the dns-message path: only 2xx JSON responses with
-// the right Content-Type are accepted; attempts fail over sequentially.
+// the right Content-Type that actually parse as the dns-json schema are
+// accepted; malformed bodies fail over sequentially.
 //
 // URL flags (path suffixes, URL overrides env):
 //   /dns-query-json/v4        → force type=A (answer family)
@@ -13,6 +14,7 @@
 import type { Context } from "hono";
 import type { DoHConfig, Family } from "../config.js";
 import { corsHeaders, textError } from "../errors.js";
+import { acceptsMediaType, parseMediaType } from "../media.js";
 import { parseClientIp } from "../dns/ecs.js";
 import { formatEcsPrefix, parseIp } from "../dns/ip.js";
 import { debugLog } from "../log.js";
@@ -22,6 +24,15 @@ const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
 const JSON_BASE = "/dns-query-json";
 const INVALID = "__invalid__";
+
+/** Minimal dns-json schema (Google resolve style) after validation. */
+interface JsonResponse {
+  Status?: unknown;
+  Question?: unknown;
+  Answer?: unknown;
+  Authority?: unknown;
+  Additional?: unknown;
+}
 
 interface JsonFlags {
   family: Family | null;
@@ -72,10 +83,8 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     // carries `name` IS a JSON query regardless of what Accept third-party
     // tools / browsers happen to send (RFC 8484 says SHOULD, not MUST).
     const wantsJson =
-      accept === "" ||
-      accept === "*/*" ||
-      accept.includes(JSON_MIME) ||
-      accept.includes("application/json") ||
+      acceptsMediaType(accept, JSON_MIME) ||
+      acceptsMediaType(accept, "application/json") ||
       c.req.query("ct") === JSON_MIME;
 
     const name = c.req.query("name");
@@ -122,12 +131,13 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     headers.set("User-Agent", `vercel-doh/${config.appVersion}`);
 
     try {
-      const body = await fetchJsonWithFailover(config, upstreams, params, headers);
+      const parsed = await fetchJsonWithFailover(config, upstreams, params, headers);
+      const cacheControl = jsonCacheControl(config, parsed, ecsSensitive);
       const out = new Headers(corsHeaders());
       out.set("Content-Type", "application/json");
-      out.set("Cache-Control", ecsSensitive ? "no-store" : "public, s-maxage=300");
-      debugLog(`dns-json ${name} -> ok (family=${family} ecs=${ecsSensitive})`);
-      return new Response(body, { status: 200, headers: out });
+      out.set("Cache-Control", cacheControl);
+      debugLog(`dns-json ${name} -> ok (family=${family} ecs=${ecsSensitive} cache=${cacheControl})`);
+      return new Response(JSON.stringify(parsed), { status: 200, headers: out });
     } catch (err) {
       if (err instanceof UpstreamError) {
         debugLog(`dns-json all upstreams failed: ${err.message}`);
@@ -139,12 +149,55 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
   };
 }
 
+/**
+ * TTL-aware Cache-Control for dns-json responses, mirroring the dns-message
+ * path: Status 0 with answers → min Answer TTL; NXDOMAIN/NODATA → min
+ * Authority TTL (approximation of the RFC 2308 SOA negative TTL, since the
+ * dns-json schema does not expose SOA.MINIMUM); anything else or missing TTL
+ * information → no-store. ECS-sensitive responses are never shared.
+ */
+function jsonCacheControl(config: DoHConfig, parsed: JsonResponse, ecsSensitive: boolean): string {
+  if (ecsSensitive) return "no-store";
+  const status = typeof parsed.Status === "number" ? parsed.Status : -1;
+  if (status !== 0 && status !== 3) return "no-store";
+
+  const answerTtl = minTtlOf(parsed.Answer);
+  const negativeTtl = minTtlOf(parsed.Authority);
+  let ttl: number | null = null;
+  if (status === 0 && answerTtl !== null) ttl = answerTtl;
+  else if (negativeTtl !== null) ttl = negativeTtl;
+  if (ttl === null) return "no-store"; // no usable TTL (e.g. negative w/o SOA)
+
+  const capped = Math.max(0, Math.min(ttl, config.cacheMaxAge));
+  return `public, s-maxage=${capped}, stale-while-revalidate=60`;
+}
+
+/** Minimum numeric TTL across a dns-json record array, or null. */
+function minTtlOf(records: unknown): number | null {
+  if (!Array.isArray(records)) return null;
+  let min: number | null = null;
+  for (const record of records) {
+    const ttl = (record as Record<string, unknown> | null)?.TTL;
+    if (typeof ttl === "number" && Number.isFinite(ttl)) {
+      min = min === null ? ttl : Math.min(min, ttl);
+    }
+  }
+  return min;
+}
+
+/**
+ * Fetches one JSON upstream at a time with sequential failover. Only 2xx
+ * responses whose Content-Type is exactly application/dns-json or
+ * application/json AND whose body parses as the dns-json schema are accepted;
+ * anything else throws UpstreamError and fails over. Bounded by
+ * config.maxBodyBytes like the dns-message path.
+ */
 async function fetchJsonWithFailover(
   config: DoHConfig,
   upstreams: string[],
   params: URLSearchParams,
   headers: Headers,
-): Promise<Uint8Array<ArrayBuffer>> {
+): Promise<JsonResponse> {
   const attempts = Math.min(config.maxAttempts, upstreams.length);
   let lastError: Error | null = null;
   for (let i = 0; i < attempts; i++) {
@@ -161,11 +214,27 @@ async function fetchJsonWithFailover(
         redirect: "error", // SSRF: never follow redirects
       });
       if (!res.ok) throw new UpstreamError(`upstream ${target.href} -> ${res.status}`);
-      const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-      if (!contentType.includes("json")) {
+      const contentType = res.headers.get("content-type") ?? "";
+      const essence = parseMediaType(contentType);
+      if (essence !== JSON_MIME && essence !== "application/json") {
         throw new UpstreamError(`upstream ${target.href} -> unexpected content-type ${contentType}`);
       }
-      return new Uint8Array(await res.arrayBuffer());
+      const contentLength = res.headers.get("content-length");
+      if (contentLength !== null) {
+        const n = Number.parseInt(contentLength, 10);
+        if (!Number.isNaN(n) && n > config.maxBodyBytes) {
+          throw new UpstreamError(`upstream ${target.href} -> response too large (${n} bytes)`);
+        }
+      }
+      const body = new Uint8Array(await res.arrayBuffer());
+      if (body.length > config.maxBodyBytes) {
+        throw new UpstreamError(`upstream ${target.href} -> response too large (${body.length} bytes)`);
+      }
+      const parsed = validateJsonResponse(body);
+      if (!parsed) {
+        throw new UpstreamError(`upstream ${target.href} -> invalid dns-json response`);
+      }
+      return parsed;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     } finally {
@@ -173,4 +242,31 @@ async function fetchJsonWithFailover(
     }
   }
   throw lastError instanceof UpstreamError ? lastError : new UpstreamError("all JSON upstreams failed");
+}
+
+/**
+ * Parses and structurally validates a dns-json body (Google resolve style):
+ * a JSON object with a numeric `Status` when present and array-typed
+ * Question/Answer/Authority/Additional sections with object entries. Returns
+ * null when the body is not trustworthy as a dns-json response.
+ */
+function validateJsonResponse(body: Uint8Array): JsonResponse | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  if ("Status" in obj && typeof obj.Status !== "number") return null;
+  for (const key of ["Question", "Answer", "Authority", "Additional"] as const) {
+    const value = obj[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) return null;
+    if (value.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry))) {
+      return null;
+    }
+  }
+  return obj as JsonResponse;
 }

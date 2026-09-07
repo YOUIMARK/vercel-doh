@@ -1,7 +1,9 @@
 // RFC 8467 response padding. We pad by adding an EDNS Padding option (code 12)
 // into the response's existing OPT RR — the only RFC-correct way for a proxy
-// that must not alter the answer section. Messages without an OPT RR are left
-// untouched (adding one would change semantics).
+// that must not alter the answer section. Responses WITHOUT an OPT RR get a
+// fresh OPT RR appended carrying only the padding option (RFC 6891 allows a
+// proxy to add OPT; this keeps padding applicable to every response, not just
+// EDNS-aware ones).
 //
 // Strategy: Random-Block-Length Padding (RFC 8467 §4.2.3) — pick a block
 // length at random from a small set, then pad to that block's multiple.
