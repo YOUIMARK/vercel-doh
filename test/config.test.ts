@@ -76,6 +76,23 @@ describe("SHOW_DOH_ENDPOINT", () => {
   });
 });
 
+describe("ECS_OVERRIDE_IP", () => {
+  it("defaults to null", () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).ecsOverrideIp).toBeNull();
+  });
+
+  it("accepts valid IPv4/IPv6", () => {
+    expect(loadConfig({ ECS_OVERRIDE_IP: "8.8.8.8" } as NodeJS.ProcessEnv).ecsOverrideIp).toBe("8.8.8.8");
+    expect(loadConfig({ ECS_OVERRIDE_IP: "2001:4860:4860::8888" } as NodeJS.ProcessEnv).ecsOverrideIp).toBe("2001:4860:4860::8888");
+  });
+
+  it("rejects invalid addresses", () => {
+    for (const bad of ["not-an-ip", "8.8.8.999", "1.2.3"]) {
+      expect(() => loadConfig({ ECS_OVERRIDE_IP: bad } as NodeJS.ProcessEnv), bad).toThrow();
+    }
+  });
+});
+
 describe("DOMAIN_MAPPINGS validation", () => {
   it("accepts bare hosts and https URLs", () => {
     const cfg = loadConfig({

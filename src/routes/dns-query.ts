@@ -6,6 +6,7 @@ import { buildCacheControl } from "../cache-control.js";
 import { corsHeaders, servfailResponse, textError } from "../errors.js";
 import { debugLog } from "../log.js";
 import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp } from "../dns/ecs.js";
+import { parseIp } from "../dns/ip.js";
 import { padResponse } from "../dns/padding.js";
 import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl.js";
 import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, questionType, rcodeOf, setQuestionType } from "../dns/wire.js";
@@ -31,6 +32,8 @@ const INVALID_PATH = "__invalid__";
 export interface PathFlags {
   family: Family | null;
   behavior: EcsBehavior | null;
+  /** Fixed ECS source IP from the ecs-<ip> URL flag (null when unset). */
+  ecsOverrideIp: string | null;
   provider: string | null;
 }
 
@@ -41,17 +44,28 @@ const ECS_FLAGS = new Map<string, EcsBehavior>([
   ["no_ecs", "force_disable"],
 ]);
 
+const EMPTY_FLAGS: PathFlags = { family: null, behavior: null, ecsOverrideIp: null, provider: null };
+
 export function parsePathFlags(pathname: string, basePath: string): PathFlags {
   const base = basePath.replace(/\/+$/, "");
-  if (pathname === base) return { family: null, behavior: null, provider: null };
-  if (!pathname.startsWith(`${base}/`)) return { family: null, behavior: null, provider: null };
+  if (pathname === base) return { ...EMPTY_FLAGS };
+  if (!pathname.startsWith(`${base}/`)) return { ...EMPTY_FLAGS };
   const segments = pathname.slice(base.length + 1).split("/").filter((s) => s.length > 0);
-  const flags: PathFlags = { family: null, behavior: null, provider: null };
+  const flags: PathFlags = { ...EMPTY_FLAGS };
   for (const segment of segments) {
     if (segment === "v4") flags.family = "v4";
     else if (segment === "v6") flags.family = "v6";
     else if (ECS_FLAGS.has(segment)) flags.behavior = ECS_FLAGS.get(segment)!;
-    else if (flags.provider === null) flags.provider = segment;
+    else if (segment.startsWith("ecs-")) {
+      // ecs-<ip> forces ECS on with a fixed source IP (e.g. /dns-query/ecs-8.8.8.8).
+      const ip = segment.slice(4);
+      if (!parseIp(ip)) {
+        flags.provider = INVALID_PATH;
+      } else {
+        flags.ecsOverrideIp = ip;
+        flags.behavior = "force_enable";
+      }
+    } else if (flags.provider === null) flags.provider = segment;
     else flags.provider = INVALID_PATH; // more than one unknown segment
   }
   return flags;
@@ -84,6 +98,9 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       // regardless of the Accept header the tool sends.
       if (c.req.query("name") || wantsJson) {
         const flags = parsePathFlags(c.req.path, config.dohPath);
+        if (flags.provider === INVALID_PATH) {
+          return textError(404, "Unknown path", corsHeaders());
+        }
         return handleJsonQuery(config, {
           family: flags.family,
           ecs:
@@ -92,6 +109,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
               : flags.behavior === "force_disable"
                 ? false
                 : null,
+          ecsOverrideIp: flags.ecsOverrideIp,
         })(c);
       }
       if (acceptsMessage) return textError(400, "Missing dns parameter", corsHeaders());
@@ -155,11 +173,15 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       (effectiveBehavior === "default" && config.autoAddEcs);
     let ecsAdded = false;
     if (shouldAddEcs && ecs === "absent") {
-      const clientIp = parseClientIp(c.req.raw.headers);
-      if (clientIp) {
+      // ECS source precedence: URL ecs-<ip> flag > ECS_OVERRIDE_IP env >
+      // the client's real IP. When ECS is disabled (no-ecs) this whole block
+      // is skipped, so any override is inert.
+      const overrideIp = flags.ecsOverrideIp ?? config.ecsOverrideIp;
+      const sourceIp = overrideIp ? parseIp(overrideIp) : parseClientIp(c.req.raw.headers);
+      if (sourceIp) {
         const prefix =
-          clientIp.family === 1 ? config.ipv4EcsPrefixLength : config.ipv6EcsPrefixLength;
-        const merged = addOrMergeEcs(message, buildEcsOption(clientIp, prefix));
+          sourceIp.family === 1 ? config.ipv4EcsPrefixLength : config.ipv6EcsPrefixLength;
+        const merged = addOrMergeEcs(message, buildEcsOption(sourceIp, prefix));
         if (merged !== message) {
           message = merged;
           ecsAdded = true;

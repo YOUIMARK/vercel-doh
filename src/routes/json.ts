@@ -3,17 +3,18 @@
 // the right Content-Type are accepted; attempts fail over sequentially.
 //
 // URL flags (path suffixes, URL overrides env):
-//   /dns-query-json/v4        → IPv4-only upstream connection
-//   /dns-query-json/v6        → IPv6-only upstream connection
+//   /dns-query-json/v4        → force type=A (answer family)
+//   /dns-query-json/v6        → force type=AAAA
 //   /dns-query-json/ecs       → inject edns_client_subnet from the client IP
+//   /dns-query-json/ecs-<ip>  → inject edns_client_subnet from a fixed IP
 //   /dns-query-json/no-ecs    → strip any edns_client_subnet (privacy)
-//   combinable: /dns-query-json/v4/ecs
+//   combinable: /dns-query-json/v4/ecs-8.8.8.8
 
 import type { Context } from "hono";
 import type { DoHConfig, Family } from "../config.js";
 import { corsHeaders, textError } from "../errors.js";
 import { parseClientIp } from "../dns/ecs.js";
-import { formatEcsPrefix } from "../dns/ip.js";
+import { formatEcsPrefix, parseIp } from "../dns/ip.js";
 import { debugLog } from "../log.js";
 import { UpstreamError } from "../upstream.js";
 
@@ -25,18 +26,28 @@ const INVALID = "__invalid__";
 interface JsonFlags {
   family: Family | null;
   ecs: boolean | null; // true = force on, false = force off
+  /** Fixed ECS source IP from the ecs-<ip> flag (null when unset). */
+  ecsOverrideIp: string | null;
 }
 
 function parseJsonFlags(pathname: string): JsonFlags {
-  if (!pathname.startsWith(`${JSON_BASE}/`)) return { family: null, ecs: null };
+  if (!pathname.startsWith(`${JSON_BASE}/`)) return { family: null, ecs: null, ecsOverrideIp: null };
   const segments = pathname.slice(JSON_BASE.length + 1).split("/").filter((s) => s.length > 0);
-  const flags: JsonFlags = { family: null, ecs: null };
+  const flags: JsonFlags = { family: null, ecs: null, ecsOverrideIp: null };
   for (const segment of segments) {
     if (segment === "v4") flags.family = "v4";
     else if (segment === "v6") flags.family = "v6";
     else if (segment === "ecs" || segment === "auto_ecs") flags.ecs = true;
     else if (segment === "no-ecs" || segment === "no_ecs") flags.ecs = false;
-    else flags.family = INVALID as Family;
+    else if (segment.startsWith("ecs-")) {
+      const ip = segment.slice(4);
+      if (!parseIp(ip)) {
+        flags.family = INVALID as Family;
+      } else {
+        flags.ecs = true;
+        flags.ecsOverrideIp = ip;
+      }
+    } else flags.family = INVALID as Family;
   }
   return flags;
 }
@@ -54,21 +65,24 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     // apply when no /dns-query-json/{flag} suffix is present.
     const family = flags.family ?? baseFlags?.family ?? config.upstreamFamily;
     const ecsFlag = flags.ecs ?? baseFlags?.ecs ?? null;
+    const ecsOverrideIp = flags.ecsOverrideIp ?? baseFlags?.ecsOverrideIp ?? config.ecsOverrideIp;
 
     const accept = c.req.header("accept") ?? "";
-    // Lenient negotiation: absent / */* / application/json all accept dns-json
-    // (a request carrying `name` is a JSON query regardless of what Accept
-    // third-party tools happen to send — RFC 8484 says SHOULD, not MUST).
+    // Accept is only enforced when there is no `name` param: a request that
+    // carries `name` IS a JSON query regardless of what Accept third-party
+    // tools / browsers happen to send (RFC 8484 says SHOULD, not MUST).
     const wantsJson =
       accept === "" ||
       accept === "*/*" ||
       accept.includes(JSON_MIME) ||
       accept.includes("application/json") ||
       c.req.query("ct") === JSON_MIME;
-    if (!wantsJson) return textError(406, "Not Acceptable: application/dns-json required", corsHeaders());
 
     const name = c.req.query("name");
-    if (!name) return textError(400, "Missing name parameter", corsHeaders());
+    if (!name) {
+      if (!wantsJson) return textError(406, "Not Acceptable: application/dns-json required", corsHeaders());
+      return textError(400, "Missing name parameter", corsHeaders());
+    }
 
     const upstreams = config.jsonUpstreamUrls;
     if (upstreams.length === 0) return textError(500, "No JSON upstream configured", corsHeaders());
@@ -80,12 +94,14 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     }
 
     // ── ECS flag: inject the client subnet (proxy knows the client IP) ──
+    // Source precedence: ecs-<ip> flag > ECS_OVERRIDE_IP env > real client IP.
+    // When ECS is disabled (no-ecs) this block is skipped — override is inert.
     if (ecsFlag === true) {
-      const clientIp = parseClientIp(c.req.raw.headers);
-      if (clientIp) {
+      const sourceIp = ecsOverrideIp ? parseIp(ecsOverrideIp) : parseClientIp(c.req.raw.headers);
+      if (sourceIp) {
         const prefix =
-          clientIp.family === 1 ? config.ipv4EcsPrefixLength : config.ipv6EcsPrefixLength;
-        params.set("edns_client_subnet", formatEcsPrefix(clientIp, prefix));
+          sourceIp.family === 1 ? config.ipv4EcsPrefixLength : config.ipv6EcsPrefixLength;
+        params.set("edns_client_subnet", formatEcsPrefix(sourceIp, prefix));
       }
     } else if (ecsFlag === false) {
       params.delete("edns_client_subnet"); // privacy: never leak the subnet

@@ -10,6 +10,7 @@ const doCheckbox = document.getElementById("opt-do");
 const cdCheckbox = document.getElementById("opt-cd");
 const familySelect = document.getElementById("opt-family");
 const ecsSelect = document.getElementById("opt-ecs");
+const ecsIpInput = document.getElementById("opt-ecs-ip");
 const submitButton = document.getElementById("submit-button");
 const buttonText = document.getElementById("button-text");
 const spinner = document.getElementById("spinner");
@@ -18,15 +19,28 @@ const endpointCode = document.getElementById("endpoint-code");
 const copyButton = document.getElementById("copy-endpoint");
 const epFamily = document.getElementById("ep-family");
 const epEcs = document.getElementById("ep-ecs");
+const epEcsIp = document.getElementById("ep-ecs-ip");
 
 // ── DoH endpoint display (client-config builder) ────────────────────────
 // The server injects the configured base path via window.DOH_ENDPOINT
 // (path obfuscation); default to /dns-query when absent.
 const dohPath = window.DOH_ENDPOINT || "/dns-query";
 
-/** Joins selected URL flags: "v4", "ecs", "v4/ecs", … ("" when none). */
-function flagPath(familySel, ecsSel) {
-  return [familySel.value, ecsSel.value].filter(Boolean).join("/");
+/** Loose client-side IP check (the server validates strictly). */
+function looksLikeIp(value) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || /^[0-9a-fA-F:]{2,}$/.test(value);
+}
+
+/** Joins selected URL flags: "v4", "ecs", "ecs-8.8.8.8", "v4/ecs-8.8.8.8", … ("" when none). */
+function flagPath(familySel, ecsSel, ecsIpSel) {
+  const family = familySel.value;
+  const ecs = ecsSel.value;
+  // ECS IP override only applies when ECS is explicitly ON (关闭/默认 → inert).
+  const ecsFlag =
+    ecs === "ecs" && ecsIpSel && ecsIpSel.value && looksLikeIp(ecsIpSel.value.trim())
+      ? `ecs-${ecsIpSel.value.trim()}`
+      : ecs;
+  return [family, ecsFlag].filter(Boolean).join("/");
 }
 
 // Selecting an address family auto-switches the record type to match:
@@ -46,6 +60,7 @@ function renderEndpoint() {
   const flags = flagPath(
     epFamily || { value: "" },
     epEcs || { value: "" },
+    epEcsIp || { value: "" },
   );
   const endpoint = `${location.origin}${dohPath}${flags ? "/" + flags : ""}`;
   if (endpointCode) endpointCode.textContent = endpoint;
@@ -55,6 +70,7 @@ function renderEndpoint() {
 let currentEndpoint = renderEndpoint();
 if (epFamily) epFamily.addEventListener("change", () => (currentEndpoint = renderEndpoint()));
 if (epEcs) epEcs.addEventListener("change", () => (currentEndpoint = renderEndpoint()));
+if (epEcsIp) epEcsIp.addEventListener("input", () => (currentEndpoint = renderEndpoint()));
 
 if (copyButton) {
   copyButton.addEventListener("click", async () => {
@@ -201,7 +217,7 @@ form.addEventListener("submit", async (event) => {
   if (doCheckbox.checked) params.set("do", "1");
   if (cdCheckbox.checked) params.set("cd", "1");
   // Apply the selected URL flags to this query (v4/v6/ecs/no-ecs).
-  const flags = flagPath(familySelect || { value: "" }, ecsSelect || { value: "" });
+  const flags = flagPath(familySelect || { value: "" }, ecsSelect || { value: "" }, ecsIpInput || { value: "" });
   const jsonPath = `/dns-query-json${flags ? "/" + flags : ""}`;
 
   results.replaceChildren(el("p", "placeholder", "查询中…"));

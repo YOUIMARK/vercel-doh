@@ -48,6 +48,33 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Decodes the ?dns= param sent upstream and returns { url, message }. */
+function forwardedQuery(call: number) {
+  const url = new URL(String(vi.mocked(fetch).mock.calls[call]![0]));
+  const dns = url.searchParams.get("dns")!;
+  const message = new Uint8Array(Buffer.from(dns.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+  return { url, message };
+}
+
+/** Extracts the ECS option's address bytes from a message with an OPT RR. */
+function ecsAddressOf(msg: Uint8Array): Uint8Array | null {
+  const sections = parseSections(msg)!;
+  const opt = sections.additional.rrs.find((r) => r.rrType === 41)!;
+  const view = new DataView(msg.buffer, msg.byteOffset, msg.byteLength);
+  let o = opt.rdataOffset;
+  const end = opt.rdataOffset + opt.rdLength;
+  while (o + 4 <= end) {
+    const code = view.getUint16(o);
+    const len = view.getUint16(o + 2);
+    if (code === 8) {
+      const src = view.getUint8(o + 6);
+      return msg.slice(o + 8, o + 8 + Math.ceil(src / 8));
+    }
+    o += 4 + len;
+  }
+  return null;
+}
+
 describe("GET /dns-query", () => {
   it("proxies a valid query and sets TTL-aware cache headers", async () => {
     const app = makeApp();
@@ -405,6 +432,35 @@ describe("dns-json served at the DoH base path (dns.google/resolve style)", () =
     expect(res.status).toBe(200);
   });
 
+  it("serves JSON for browser-style Accept when ?name= is present (no 406)", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    // Browser Accept header, no type param — must still return JSON.
+    const res = await makeApp().request("/dns-query-json?name=example.com", {
+      headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+  });
+
+  it("serves JSON at the DoH base path for browser-style Accept", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp({ DOH_PATH: "/youimark" }).request("/youimark?name=example.com", {
+      headers: { accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+  });
+
   it("applies base-path flags when dispatching JSON from the DoH base (e.g. /youimark/v6)", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ Status: 0 }), {
@@ -537,14 +593,6 @@ describe("path-based provider mapping", () => {
 });
 
 describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
-  /** Decodes the ?dns= param sent upstream and returns { url, message }. */
-  const forwardedQuery = (call: number) => {
-    const url = new URL(String(vi.mocked(fetch).mock.calls[call]![0]));
-    const dns = url.searchParams.get("dns")!;
-    const message = new Uint8Array(Buffer.from(dns.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
-    return { url, message };
-  };
-
   const aaaaQuery = buildQuery({ question: buildQuestion("example.com", 28) });
 
   it("/v4 rewrites AAAA questions to A", async () => {
@@ -630,6 +678,111 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
     const res = await app.request(`/dns-query/foo/bar?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(404);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+});
+
+describe("ECS IP override (ecs-<ip> flag / ECS_OVERRIDE_IP env)", () => {
+  const postEcs = (app: ReturnType<typeof makeApp>, path: string, query = buildQuery()) =>
+    app.request(path, {
+      method: "POST",
+      headers: {
+        ...acceptMessage,
+        "content-type": "application/dns-message",
+      },
+      body: query,
+    });
+
+  it("ecs-<ip> flag injects that IP as the ECS subnet (no client headers needed)", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+
+    const res = await postEcs(app, "/dns-query/ecs-8.8.8.8");
+    expect(res.status).toBe(200);
+    const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
+    const sentBody = sent.body as Uint8Array;
+    expect(Array.from(ecsAddressOf(sentBody)!)).toEqual([8, 8, 8]); // /24 carries 3 bytes (4th octet masked to 0)
+  });
+
+  it("ECS_OVERRIDE_IP env applies when ECS is enabled", async () => {
+    const app = makeApp({ ECS_OVERRIDE_IP: "8.8.4.4" });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+
+    const res = await postEcs(app, "/dns-query/ecs");
+    expect(res.status).toBe(200);
+    const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
+    expect(Array.from(ecsAddressOf(sent.body as Uint8Array)!)).toEqual([8, 8, 4]);
+  });
+
+  it("URL ecs-<ip> flag beats ECS_OVERRIDE_IP env", async () => {
+    const app = makeApp({ ECS_OVERRIDE_IP: "8.8.4.4" });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+
+    const res = await postEcs(app, "/dns-query/ecs-1.1.1.1");
+    expect(res.status).toBe(200);
+    const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
+    expect(Array.from(ecsAddressOf(sent.body as Uint8Array)!)).toEqual([1, 1, 1]);
+  });
+
+  it("override is inert when ECS is disabled (/no-ecs)", async () => {
+    const app = makeApp({ ECS_OVERRIDE_IP: "8.8.4.4", AUTO_ADD_ECS: "true" });
+    const query = buildQuery();
+    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
+
+    const res = await app.request(`/dns-query/no-ecs?dns=${encodeBase64Url(query)}`, {
+      headers: acceptMessage,
+    });
+    expect(res.status).toBe(200);
+    expect(ecsStatus(forwardedQuery(0).message)).toBe("absent");
+  });
+
+  it("rejects an invalid ecs-<ip> flag with 404", async () => {
+    const app = makeApp();
+    const query = buildQuery();
+    const res = await app.request(`/dns-query/ecs-notanip?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    expect(res.status).toBe(404);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid ecs-<ip> flag on the JSON base path with 404", async () => {
+    const res = await makeApp({ DOH_PATH: "/youimark" }).request("/youimark/ecs-notanip?name=example.com", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(404);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("JSON: /dns-query-json/ecs-8.8.8.8 forwards the fixed subnet", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp().request("/dns-query-json/ecs-8.8.8.8?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.get("edns_client_subnet")).toBe("8.8.8.0/24");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("JSON: base-path flag /youimark/ecs-9.9.9.9 applies when dispatched", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp({ DOH_PATH: "/youimark" }).request("/youimark/ecs-9.9.9.9?name=example.com&type=A", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.get("edns_client_subnet")).toBe("9.9.9.0/24");
   });
 });
 

@@ -41,6 +41,7 @@ vercel deploy --prod
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 带 ECS 的请求走这里 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | 网页工具的 dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 需要地域解析再开,会向上游泄露客户端子网 |
+| `ECS_OVERRIDE_IP` | 空 | 固定 ECS 源 IP(如 `8.8.8.8`)。**仅当 ECS 开启时生效**,no-ecs 时失效;URL `ecs-<IP>` 优先 |
 | `CACHE_MAX_AGE` | `300` | GET 缓存 s-maxage 上限(秒) |
 | `RACE_UPSTREAMS` | `false` | `true` = 并发竞速(最快者胜,牺牲隐私) |
 | `UPSTREAM_TIMEOUT_MS` | `3000` | 单上游超时 |
@@ -113,9 +114,11 @@ https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 /v4        只返回 A 记录(代理把查询类型重写为 A;覆盖 UPSTREAM_FAMILY)
 /v6        只返回 AAAA 记录(重写为 AAAA)
 /ecs       强制附加 ECS(= /auto_ecs)
+/ecs-<IP>  强制附加 ECS 并用指定 IP 作为子网(如 /ecs-8.8.8.8,可测地域解析;
+           仅当 ECS 开启时生效,no-ecs 时失效)
 /no-ecs    强制禁用 ECS(= /no_ecs)
 
-例: https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/v4/ecs
+例: https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/v4/ecs-8.8.8.8
     https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/v6/google   (v6 + provider)
 ```
 

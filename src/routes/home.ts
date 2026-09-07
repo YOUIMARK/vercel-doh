@@ -41,9 +41,12 @@ export function homePage(config: DoHConfig) {
           <option value="no-ecs">关闭</option>
         </select>
       </label>
+      <label>ECS IP 覆盖
+        <input type="text" id="ep-ecs-ip" placeholder="可选,如 8.8.8.8" autocomplete="off" autocapitalize="none" spellcheck="false">
+      </label>
     </div>
     <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
-    端点路径: <code>${dohEndpoint}</code> · 上方下拉会拼出带 flag 的端点(如 <code>${dohEndpoint}/v4/ecs</code>),URL 优先于环境变量;上方查询表单的「地址族/ECS」下拉作用于本次查询。</p>
+    端点路径: <code>${dohEndpoint}</code> · 上方下拉会拼出带 flag 的端点(如 <code>${dohEndpoint}/v4/ecs-8.8.8.8</code>),URL 优先于环境变量;上方查询表单的「地址族/ECS/ECS IP」作用于本次查询。</p>
   </section>`
       : `<section class="card">
     <h2>🛡 DoH 端点</h2>
@@ -94,6 +97,9 @@ ${endpointScript}
             <option value="ecs">开启</option>
             <option value="no-ecs">关闭</option>
           </select>
+        </label>
+        <label>ECS IP 覆盖
+          <input type="text" id="opt-ecs-ip" placeholder="可选,如 8.8.8.8" autocomplete="off" autocapitalize="none" spellcheck="false">
         </label>
         <label><input type="checkbox" id="opt-do"> DNSSEC OK (DO)</label>
         <label><input type="checkbox" id="opt-cd"> 禁用 DNSSEC 校验 (CD)</label>

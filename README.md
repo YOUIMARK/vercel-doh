@@ -31,9 +31,11 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   XFF 最右段),过滤私网/保留地址,**不信任可伪造的最左段**
 - **路径映射(可选)**: `/dns-query/{provider}` 经 `DOMAIN_MAPPINGS` 路由到指定上游
 - **URL flags(按请求覆盖环境变量)**: 在端点路径后追加
-  `/v4`(只返回 A 记录)/`/v6`(只返回 AAAA 记录)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS),
-  可组合且顺序任意,如 `/dns-query/v4/ecs`、`/dns-query/v6/google`;URL 优先于环境变量
-  (v4/v6 = **答案族**: 代理把查询类型重写为 A/AAAA,而非限制连接地址)
+  `/v4`(只返回 A 记录)/`/v6`(只返回 AAAA 记录)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS)/
+  `/ecs-<IP>`(强制 ECS 并用指定 IP 作为子网,如 `/ecs-8.8.8.8`,可用于测试地域解析),
+  可组合且顺序任意,如 `/dns-query/v4/ecs-8.8.8.8`;URL 优先于环境变量
+  (v4/v6 = **答案族**: 代理把查询类型重写为 A/AAAA,而非限制连接地址;
+  ecs-<IP> 仅当 ECS 开启时生效,关闭(no-ecs)时该配置失效)
 - **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
   **DoH 基路径同样支持 JSON 查询**(`/youimark?name=...` 即 dns.google/resolve 风格,
   无需特定 Accept);flag 后缀同样生效,如 `/dns-query-json/v4/ecs`
@@ -87,6 +89,7 @@ curl -X POST --data-binary @query.bin \
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 请求带 ECS 时使用的上游 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 全局自动附加 ECS(默认关,隐私) |
+| `ECS_OVERRIDE_IP` | 空 | 固定 ECS 源 IP(如 `8.8.8.8`)。**仅当 ECS 开启时生效**;关闭(no-ecs)时失效;URL `ecs-<IP>` 优先于它 |
 | `IPV4_ECS_PREFIX_LENGTH` | `24` | ECS IPv4 前缀长度(0–32) |
 | `IPV6_ECS_PREFIX_LENGTH` | `56` | ECS IPv6 前缀长度(0–128) |
 | `CACHE_MAX_AGE` | `300` | GET 缓存 `s-maxage` 上限(秒) |

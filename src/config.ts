@@ -2,6 +2,7 @@
 // Every env var is parsed and validated here; bad values fail fast at boot.
 
 import { setDebugLogging } from "./log.js";
+import { parseIp } from "./dns/ip.js";
 
 export interface DomainMapping {
   /**
@@ -31,6 +32,12 @@ export interface DoHConfig {
   upstreamFamily: Family;
   /** Whether the frontend may display the DoH endpoint path (default: hidden). */
   showDohEndpoint: boolean;
+  /**
+   * Optional fixed ECS source IP (ECS_OVERRIDE_IP). Takes effect ONLY when
+   * ECS is enabled for the request (AUTO_ADD_ECS or an ecs flag); when ECS is
+   * disabled (no-ecs) this override is inert. URL flag ecs-<ip> beats it.
+   */
+  ecsOverrideIp: string | null;
   /** Globally auto-attach ECS to queries without one (privacy: default off). */
   autoAddEcs: boolean;
   ipv4EcsPrefixLength: number;
@@ -60,6 +67,7 @@ export const DEFAULTS = {
   DOH_PATH: "/dns-query",
   UPSTREAM_FAMILY: "auto",
   SHOW_DOH_ENDPOINT: false,
+  ECS_OVERRIDE_IP: null as string | null,
   AUTO_ADD_ECS: false,
   IPV4_ECS_PREFIX_LENGTH: 24,
   IPV6_ECS_PREFIX_LENGTH: 56,
@@ -169,6 +177,16 @@ export function parseFamily(value: string | undefined): Family {
   throw new Error(`invalid UPSTREAM_FAMILY: "${value}" (expected auto | v4 | v6)`);
 }
 
+/** Parses the optional ECS override IP; null when unset, throws on invalid input. */
+export function parseOptionalIp(value: string | undefined): string | null {
+  if (value === undefined || value.trim() === "") return null;
+  const trimmed = value.trim();
+  if (!parseIp(trimmed)) {
+    throw new Error(`invalid ECS_OVERRIDE_IP: "${value}" (expected an IPv4 or IPv6 address)`);
+  }
+  return trimmed;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
   const config: DoHConfig = {
     upstreamUrls: parseUrlList(env.UPSTREAM_DOH_URLS, DEFAULTS.UPSTREAM_DOH_URLS),
@@ -177,6 +195,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
     dohPath: parseDohPath(env.DOH_PATH),
     upstreamFamily: parseFamily(env.UPSTREAM_FAMILY),
     showDohEndpoint: parseBool(env.SHOW_DOH_ENDPOINT, DEFAULTS.SHOW_DOH_ENDPOINT),
+    ecsOverrideIp: parseOptionalIp(env.ECS_OVERRIDE_IP),
     autoAddEcs: parseBool(env.AUTO_ADD_ECS, DEFAULTS.AUTO_ADD_ECS),
     ipv4EcsPrefixLength: parseNumber(env.IPV4_ECS_PREFIX_LENGTH, DEFAULTS.IPV4_ECS_PREFIX_LENGTH, 0, 32, "IPV4_ECS_PREFIX_LENGTH"),
     ipv6EcsPrefixLength: parseNumber(env.IPV6_ECS_PREFIX_LENGTH, DEFAULTS.IPV6_ECS_PREFIX_LENGTH, 0, 128, "IPV6_ECS_PREFIX_LENGTH"),
