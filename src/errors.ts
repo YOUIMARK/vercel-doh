@@ -1,7 +1,7 @@
 // Error response builders. For DoH we prefer a real dns-message with SERVFAIL
 // so standard clients can match it to their pending query.
 
-import { buildErrorResponse } from "./dns/wire";
+import { buildErrorResponse } from "./dns/wire.js";
 
 const DNS_MESSAGE = "application/dns-message";
 

@@ -2,10 +2,10 @@
 // and local dev (src/dev.ts).
 
 import { Hono } from "hono";
-import { loadConfig, type DoHConfig } from "./config";
-import { handleDnsQuery } from "./routes/dns-query";
-import { handleJsonQuery } from "./routes/json";
-import { homePage, health } from "./routes/home";
+import { loadConfig, type DoHConfig } from "./config.js";
+import { handleDnsQuery } from "./routes/dns-query.js";
+import { handleJsonQuery } from "./routes/json.js";
+import { homePage, health } from "./routes/home.js";
 
 export function createApp(config: DoHConfig = loadConfig()): Hono {
   const app = new Hono();

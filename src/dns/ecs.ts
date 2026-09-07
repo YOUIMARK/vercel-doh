@@ -7,9 +7,9 @@
 //     with the real client subnet.
 //  3. Malformed ECS options must be rejected, not silently ignored.
 
-import { countOptRrs, parseSections, toView } from "./wire";
-import { isPrivateOrReserved, parseIp, type IpAddress } from "./ip";
-import { debugLog } from "../log";
+import { countOptRrs, parseSections, toView } from "./wire.js";
+import { isPrivateOrReserved, parseIp, type IpAddress } from "./ip.js";
+import { debugLog } from "../log.js";
 
 export const ECS_OPTION_CODE = 8;
 export const OPT_RR_TYPE = 41; // EDNS(0)

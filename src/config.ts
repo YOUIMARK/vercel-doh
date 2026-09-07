@@ -1,7 +1,7 @@
 // Single source of truth for all configuration.
 // Every env var is parsed and validated here; bad values fail fast at boot.
 
-import { setDebugLogging } from "./log";
+import { setDebugLogging } from "./log.js";
 
 export interface DomainMapping {
   /**

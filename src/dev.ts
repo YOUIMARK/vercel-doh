@@ -5,7 +5,7 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
-import app from "./app";
+import app from "./app.js";
 
 const devApp = new Hono();
 devApp.use("/style.css", serveStatic({ root: "./public" }));

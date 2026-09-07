@@ -4,7 +4,7 @@
 // Negative answers (NXDOMAIN / NODATA): per RFC 2308 the negative TTL is
 // min(SOA TTL, SOA.MINIMUM) from the AUTHORITY section's SOA record.
 
-import { parseSections, skipName, toView } from "./wire";
+import { parseSections, skipName, toView } from "./wire.js";
 
 const SOA_RR_TYPE = 6;
 

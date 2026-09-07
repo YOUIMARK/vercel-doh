@@ -10,12 +10,12 @@
 //   combinable: /dns-query-json/v4/ecs
 
 import type { Context } from "hono";
-import type { DoHConfig, Family } from "../config";
-import { corsHeaders, textError } from "../errors";
-import { parseClientIp } from "../dns/ecs";
-import { formatEcsPrefix } from "../dns/ip";
-import { debugLog } from "../log";
-import { getDispatcher, UpstreamError } from "../upstream";
+import type { DoHConfig, Family } from "../config.js";
+import { corsHeaders, textError } from "../errors.js";
+import { parseClientIp } from "../dns/ecs.js";
+import { formatEcsPrefix } from "../dns/ip.js";
+import { debugLog } from "../log.js";
+import { getDispatcher, UpstreamError } from "../upstream.js";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";

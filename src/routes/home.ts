@@ -1,7 +1,7 @@
 // Landing page: the online DNS lookup tool (markup only — styles/scripts
 // are served from public/ by the Vercel CDN, and by dev.ts locally).
 
-import type { DoHConfig } from "../config";
+import type { DoHConfig } from "../config.js";
 
 export function health() {
   return (): Response =>

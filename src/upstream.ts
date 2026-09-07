@@ -11,9 +11,9 @@
 // status codes, Content-Type, DNS validation and body reading — is resolved
 // INSIDE this layer. The caller only ever receives a validated DNS payload.
 
-import type { DoHConfig, Family } from "./config";
-import { validateDnsResponse } from "./dns/validate";
-import { debugLog } from "./log";
+import type { DoHConfig, Family } from "./config.js";
+import { validateDnsResponse } from "./dns/validate.js";
+import { debugLog } from "./log.js";
 import { Agent } from "undici";
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 

@@ -1,16 +1,16 @@
 // The core RFC 8484 DoH handler (GET + POST).
 
 import type { Context } from "hono";
-import type { DoHConfig, Family } from "../config";
-import { buildCacheControl } from "../cache-control";
-import { corsHeaders, servfailResponse, textError } from "../errors";
-import { debugLog } from "../log";
-import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp } from "../dns/ecs";
-import { padResponse } from "../dns/padding";
-import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl";
-import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, rcodeOf } from "../dns/wire";
-import { buildUpstreamHeaders, queryUpstreams, resolveProvider, UpstreamError } from "../upstream";
-import { handleJsonQuery } from "./json";
+import type { DoHConfig, Family } from "../config.js";
+import { buildCacheControl } from "../cache-control.js";
+import { corsHeaders, servfailResponse, textError } from "../errors.js";
+import { debugLog } from "../log.js";
+import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp } from "../dns/ecs.js";
+import { padResponse } from "../dns/padding.js";
+import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl.js";
+import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, rcodeOf } from "../dns/wire.js";
+import { buildUpstreamHeaders, queryUpstreams, resolveProvider, UpstreamError } from "../upstream.js";
+import { handleJsonQuery } from "./json.js";
 
 export const DNS_MESSAGE = "application/dns-message";
 

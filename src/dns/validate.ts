@@ -6,7 +6,7 @@
 //   - a structurally sound DNS message: parseable header + sections, QR=1,
 //     standard opcode, no trailing garbage
 
-import { parseHeader, parseSections, type DnsHeader } from "./wire";
+import { parseHeader, parseSections, type DnsHeader } from "./wire.js";
 
 export interface ValidatedResponse {
   header: DnsHeader;

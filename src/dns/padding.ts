@@ -3,7 +3,7 @@
 // that must not alter the answer section. Messages without an OPT RR are left
 // untouched (adding one would change semantics).
 
-import { parseSections, toView } from "./wire";
+import { parseSections, toView } from "./wire.js";
 
 export const PADDING_OPTION_CODE = 12;
 export const PADDING_BLOCK_SIZE = 128;
