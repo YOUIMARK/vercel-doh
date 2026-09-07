@@ -8,6 +8,9 @@ Edge Functions 已对新项目弃用)。
 多上游**顺序故障转移**(不广播,保护隐私)、TTL 感知缓存、正确的 EDNS Client
 Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值。
 
+> 📖 完整部署步骤、验证命令与生产化防护(路径混淆 / Vercel Firewall 限流 / IP 白名单)
+> 见 **[DEPLOYMENT.md](./DEPLOYMENT.md)**。
+
 ## 特性
 
 - **RFC 8484 兼容**: GET `?dns=<base64url>` 与 POST `application/dns-message`
