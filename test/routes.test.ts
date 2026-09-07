@@ -144,10 +144,14 @@ describe("CORS / aux endpoints", () => {
     expect(await res.text()).toBe("ok");
   });
 
-  it("serves the landing page at /", async () => {
+  it("serves the DNS lookup tool at /", async () => {
     const res = await makeApp().request("/");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    expect(html).toContain('id="dns-form"');
+    expect(html).toContain('src="/script.js"');
+    expect(html).toContain('href="/style.css"');
   });
 
   it("serves dns-json for the JSON API", async () => {
