@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { buildEcsOption, ecsStatus } from "../src/dns/ecs";
-import { encodeBase64Url, parseHeader, parseSections, rcodeOf } from "../src/dns/wire";
-import { getDispatcher } from "../src/upstream";
+import { encodeBase64Url, parseHeader, parseSections, questionType, rcodeOf } from "../src/dns/wire";
 import { buildOptRr, buildQuery, buildResponse, buildQuestion, concat } from "./helpers";
 
 const UPSTREAM = "https://up.example/dns-query";
@@ -245,13 +244,19 @@ describe("CORS / aux endpoints", () => {
     expect(html).toContain('id="dns-form"');
     expect(html).toContain('src="/script.js"');
     expect(html).toContain('href="/style.css"');
-    expect(html).toContain('window.DOH_ENDPOINT="/dns-query"');
   });
 
-  it("exposes the obfuscated DoH path to the frontend", async () => {
-    const res = await makeApp({ DOH_PATH: "/x9k2" }).request("/");
+  it("hides the DoH path from the frontend by default (SHOW_DOH_ENDPOINT unset)", async () => {
+    const html = await (await makeApp({ DOH_PATH: "/x9k2" }).request("/")).text();
+    expect(html).not.toContain("window.DOH_ENDPOINT");
+    expect(html).not.toContain("/x9k2");
+  });
+
+  it("exposes the obfuscated DoH path to the frontend when SHOW_DOH_ENDPOINT=true", async () => {
+    const res = await makeApp({ DOH_PATH: "/x9k2", SHOW_DOH_ENDPOINT: "true" }).request("/");
     const html = await res.text();
     expect(html).toContain('window.DOH_ENDPOINT="/x9k2"');
+    expect(html).toContain('id="endpoint-code"');
   });
 
   it("serves dns-json for the JSON API", async () => {
@@ -294,14 +299,42 @@ describe("dns-json URL flags", () => {
       headers: { "content-type": "application/json" },
     });
 
-  it("/v4 applies the IPv4 dispatcher to the JSON upstream", async () => {
+  const calledUrlOf = () => new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+
+  it("/v4 forces type=A on the JSON upstream", async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse());
-    const res = await makeApp().request("/dns-query-json/v4?name=example.com&type=A", {
+    const res = await makeApp().request("/dns-query-json/v4?name=example.com&type=AAAA", {
       headers: { accept: "application/dns-json" },
     });
     expect(res.status).toBe(200);
-    const init = vi.mocked(fetch).mock.calls[0]![1] as RequestInit & { dispatcher?: unknown };
-    expect(init.dispatcher).toBe(getDispatcher("v4"));
+    expect(calledUrlOf().searchParams.get("type")).toBe("A");
+  });
+
+  it("/v6 forces type=AAAA even when type=A was requested", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp().request("/dns-query-json/v6?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(calledUrlOf().searchParams.get("type")).toBe("AAAA");
+  });
+
+  it("/v6 leaves non-address types untouched (e.g. MX)", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp().request("/dns-query-json/v6?name=example.com&type=MX", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(calledUrlOf().searchParams.get("type")).toBe("MX");
+  });
+
+  it("applies UPSTREAM_FAMILY env to JSON queries by default", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp({ UPSTREAM_FAMILY: "v6" }).request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    expect(calledUrlOf().searchParams.get("type")).toBe("AAAA");
   });
 
   it("/ecs injects a masked edns_client_subnet from the client IP (no-store)", async () => {
@@ -310,8 +343,7 @@ describe("dns-json URL flags", () => {
       headers: { accept: "application/dns-json", "x-vercel-forwarded-for": "8.8.8.8" },
     });
     expect(res.status).toBe(200);
-    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
-    expect(calledUrl.searchParams.get("edns_client_subnet")).toBe("8.8.8.0/24");
+    expect(calledUrlOf().searchParams.get("edns_client_subnet")).toBe("8.8.8.0/24");
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
@@ -322,19 +354,8 @@ describe("dns-json URL flags", () => {
       { headers: { accept: "application/dns-json" } },
     );
     expect(res.status).toBe(200);
-    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
-    expect(calledUrl.searchParams.has("edns_client_subnet")).toBe(false);
+    expect(calledUrlOf().searchParams.has("edns_client_subnet")).toBe(false);
     expect(res.headers.get("cache-control")).toContain("s-maxage=300");
-  });
-
-  it("applies UPSTREAM_FAMILY env to JSON queries by default", async () => {
-    vi.mocked(fetch).mockResolvedValue(jsonResponse());
-    const res = await makeApp({ UPSTREAM_FAMILY: "v6" }).request("/dns-query-json?name=example.com&type=A", {
-      headers: { accept: "application/dns-json" },
-    });
-    expect(res.status).toBe(200);
-    const init = vi.mocked(fetch).mock.calls[0]![1] as RequestInit & { dispatcher?: unknown };
-    expect(init.dispatcher).toBe(getDispatcher("v6"));
   });
 
   it("rejects unknown JSON flag suffixes with 404", async () => {
@@ -342,6 +363,61 @@ describe("dns-json URL flags", () => {
       headers: { accept: "application/dns-json" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("dns-json served at the DoH base path (dns.google/resolve style)", () => {
+  it("GET {base}?name=... returns JSON even without a dns-json Accept header", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0, Answer: [{ data: "1.2.3.4" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp({ DOH_PATH: "/youimark" }).request("/youimark?name=fd.727672.xyz&type=A");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.get("name")).toBe("fd.727672.xyz");
+  });
+
+  it("GET /dns-query-json works without any Accept header", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A");
+    expect(res.status).toBe(200);
+  });
+
+  it("accepts application/json Accept (third-party tools)", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp().request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("applies base-path flags when dispatching JSON from the DoH base (e.g. /youimark/v6)", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ Status: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const res = await makeApp({ DOH_PATH: "/youimark" }).request("/youimark/v6?name=example.com&type=A", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.get("type")).toBe("AAAA");
   });
 });
 
@@ -461,48 +537,58 @@ describe("path-based provider mapping", () => {
 });
 
 describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
-  const dispatcherOf = (call: number) =>
-    (vi.mocked(fetch).mock.calls[call]![1] as RequestInit & { dispatcher?: unknown }).dispatcher;
+  /** Decodes the ?dns= param sent upstream and returns { url, message }. */
+  const forwardedQuery = (call: number) => {
+    const url = new URL(String(vi.mocked(fetch).mock.calls[call]![0]));
+    const dns = url.searchParams.get("dns")!;
+    const message = new Uint8Array(Buffer.from(dns.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    return { url, message };
+  };
 
-  it("/v4 forces an IPv4-only dispatcher", async () => {
+  const aaaaQuery = buildQuery({ question: buildQuestion("example.com", 28) });
+
+  it("/v4 rewrites AAAA questions to A", async () => {
     const app = makeApp();
-    const query = buildQuery();
-    vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
-
-    const res = await app.request(`/dns-query/v4?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
+    vi.mocked(fetch).mockResolvedValue(validUpstream(aaaaQuery, { ttl: 60 }));
+    const res = await app.request(`/dns-query/v4?dns=${encodeBase64Url(aaaaQuery)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
-    expect(dispatcherOf(0)).toBe(getDispatcher("v4"));
+    expect(questionType(forwardedQuery(0).message)).toBe(1); // A
   });
 
-  it("/v6 forces an IPv6-only dispatcher", async () => {
+  it("/v6 rewrites A questions to AAAA", async () => {
     const app = makeApp();
-    const query = buildQuery();
+    const query = buildQuery(); // qtype A
     vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
-
     const res = await app.request(`/dns-query/v6?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
-    expect(dispatcherOf(0)).toBe(getDispatcher("v6"));
+    expect(questionType(forwardedQuery(0).message)).toBe(28); // AAAA
+  });
+
+  it("/v6 leaves non-address types (MX) untouched", async () => {
+    const app = makeApp();
+    const mxQuery = buildQuery({ question: buildQuestion("example.com", 15) });
+    vi.mocked(fetch).mockResolvedValue(validUpstream(mxQuery, { ttl: 60 }));
+    const res = await app.request(`/dns-query/v6?dns=${encodeBase64Url(mxQuery)}`, { headers: acceptMessage });
+    expect(res.status).toBe(200);
+    expect(questionType(forwardedQuery(0).message)).toBe(15);
   });
 
   it("URL flag overrides UPSTREAM_FAMILY env", async () => {
     const app = makeApp({ UPSTREAM_FAMILY: "v6" });
     const query = buildQuery();
     vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
-
     const res = await app.request(`/dns-query/v4?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
-    expect(dispatcherOf(0)).toBe(getDispatcher("v4"));
-    expect(dispatcherOf(0)).not.toBe(getDispatcher("v6"));
+    expect(questionType(forwardedQuery(0).message)).toBe(1); // v4 wins over env v6
   });
 
   it("env UPSTREAM_FAMILY applies when no URL flag is present", async () => {
     const app = makeApp({ UPSTREAM_FAMILY: "v6" });
     const query = buildQuery();
     vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
-
     const res = await app.request(`/dns-query?dns=${encodeBase64Url(query)}`, { headers: acceptMessage });
     expect(res.status).toBe(200);
-    expect(dispatcherOf(0)).toBe(getDispatcher("v6"));
+    expect(questionType(forwardedQuery(0).message)).toBe(28);
   });
 
   it("/no-ecs overrides AUTO_ADD_ECS=true env (no injection)", async () => {
@@ -514,16 +600,10 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
       headers: { ...acceptMessage, "x-vercel-forwarded-for": "8.8.8.8" },
     });
     expect(res.status).toBe(200);
-    const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
-    expect(sent.body ?? undefined).toBeUndefined(); // GET has no body; the query went via ?dns=
-    // The forwarded query must not have gained an ECS option.
-    const calledUrl = String(vi.mocked(fetch).mock.calls[0]![0]);
-    const dnsParam = new URL(calledUrl).searchParams.get("dns")!;
-    const forwarded = new Uint8Array(Buffer.from(dnsParam.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
-    expect(ecsStatus(forwarded)).toBe("absent");
+    expect(ecsStatus(forwardedQuery(0).message)).toBe("absent");
   });
 
-  it("combines flags: /v6/ecs forces family AND injects ECS", async () => {
+  it("combines flags: /v6/ecs forces AAAA AND injects ECS", async () => {
     const app = makeApp();
     const query = buildQuery();
     vi.mocked(fetch).mockResolvedValue(validUpstream(query, { ttl: 60 }));
@@ -538,9 +618,10 @@ describe("URL flags (v4/v6/ecs/no-ecs override env defaults)", () => {
       body: query,
     });
     expect(res.status).toBe(200);
-    expect(dispatcherOf(0)).toBe(getDispatcher("v6"));
     const sent = vi.mocked(fetch).mock.calls[0]![1] as RequestInit;
-    expect(ecsStatus(sent.body as Uint8Array)).toBe("positive");
+    const sentBody = sent.body as Uint8Array;
+    expect(questionType(sentBody)).toBe(28); // AAAA
+    expect(ecsStatus(sentBody)).toBe("positive");
   });
 
   it("rejects unknown path suffixes with 404", async () => {

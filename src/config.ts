@@ -11,7 +11,11 @@ export interface DomainMapping {
   targetDomain: string;
 }
 
-/** Upstream connection address family preference. */
+/**
+ * Answer-family preference: v4 forces the question type to A, v6 to AAAA
+ * (the "仅v4 / 仅v6" semantics — the RESOLVED answer family, not the
+ * upstream connection family). "auto" leaves the query unchanged.
+ */
 export type Family = "auto" | "v4" | "v6";
 
 export interface DoHConfig {
@@ -23,8 +27,10 @@ export interface DoHConfig {
   jsonUpstreamUrls: string[];
   /** Base path for the DoH endpoints (path obfuscation). Default: /dns-query. */
   dohPath: string;
-  /** Upstream connection address family: auto | v4 (IPv4 only) | v6 (IPv6 only). */
+  /** Answer family: auto | v4 (force A answers) | v6 (force AAAA answers). */
   upstreamFamily: Family;
+  /** Whether the frontend may display the DoH endpoint path (default: hidden). */
+  showDohEndpoint: boolean;
   /** Globally auto-attach ECS to queries without one (privacy: default off). */
   autoAddEcs: boolean;
   ipv4EcsPrefixLength: number;
@@ -53,6 +59,7 @@ export const DEFAULTS = {
   JSON_UPSTREAM_DOH_URLS: "https://dns.google/resolve",
   DOH_PATH: "/dns-query",
   UPSTREAM_FAMILY: "auto",
+  SHOW_DOH_ENDPOINT: false,
   AUTO_ADD_ECS: false,
   IPV4_ECS_PREFIX_LENGTH: 24,
   IPV6_ECS_PREFIX_LENGTH: 56,
@@ -169,6 +176,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
     jsonUpstreamUrls: parseUrlList(env.JSON_UPSTREAM_DOH_URLS, DEFAULTS.JSON_UPSTREAM_DOH_URLS),
     dohPath: parseDohPath(env.DOH_PATH),
     upstreamFamily: parseFamily(env.UPSTREAM_FAMILY),
+    showDohEndpoint: parseBool(env.SHOW_DOH_ENDPOINT, DEFAULTS.SHOW_DOH_ENDPOINT),
     autoAddEcs: parseBool(env.AUTO_ADD_ECS, DEFAULTS.AUTO_ADD_ECS),
     ipv4EcsPrefixLength: parseNumber(env.IPV4_ECS_PREFIX_LENGTH, DEFAULTS.IPV4_ECS_PREFIX_LENGTH, 0, 32, "IPV4_ECS_PREFIX_LENGTH"),
     ipv6EcsPrefixLength: parseNumber(env.IPV6_ECS_PREFIX_LENGTH, DEFAULTS.IPV6_ECS_PREFIX_LENGTH, 0, 128, "IPV6_ECS_PREFIX_LENGTH"),

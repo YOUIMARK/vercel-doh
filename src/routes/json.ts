@@ -15,7 +15,7 @@ import { corsHeaders, textError } from "../errors.js";
 import { parseClientIp } from "../dns/ecs.js";
 import { formatEcsPrefix } from "../dns/ip.js";
 import { debugLog } from "../log.js";
-import { getDispatcher, UpstreamError } from "../upstream.js";
+import { UpstreamError } from "../upstream.js";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
@@ -41,7 +41,7 @@ function parseJsonFlags(pathname: string): JsonFlags {
   return flags;
 }
 
-export function handleJsonQuery(config: DoHConfig) {
+export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
   return async (c: Context): Promise<Response> => {
     if (c.req.method !== "GET") {
       return textError(405, "Method Not Allowed", corsHeaders());
@@ -50,10 +50,21 @@ export function handleJsonQuery(config: DoHConfig) {
     if (flags.family === (INVALID as Family)) {
       return textError(404, "Unknown path", corsHeaders());
     }
+    // Base-path flags (e.g. /youimark/v6/ecs dispatched from the DoH base)
+    // apply when no /dns-query-json/{flag} suffix is present.
+    const family = flags.family ?? baseFlags?.family ?? config.upstreamFamily;
+    const ecsFlag = flags.ecs ?? baseFlags?.ecs ?? null;
 
     const accept = c.req.header("accept") ?? "";
+    // Lenient negotiation: absent / */* / application/json all accept dns-json
+    // (a request carrying `name` is a JSON query regardless of what Accept
+    // third-party tools happen to send — RFC 8484 says SHOULD, not MUST).
     const wantsJson =
-      accept.includes(JSON_MIME) || c.req.query("ct") === JSON_MIME;
+      accept === "" ||
+      accept === "*/*" ||
+      accept.includes(JSON_MIME) ||
+      accept.includes("application/json") ||
+      c.req.query("ct") === JSON_MIME;
     if (!wantsJson) return textError(406, "Not Acceptable: application/dns-json required", corsHeaders());
 
     const name = c.req.query("name");
@@ -69,25 +80,33 @@ export function handleJsonQuery(config: DoHConfig) {
     }
 
     // ── ECS flag: inject the client subnet (proxy knows the client IP) ──
-    if (flags.ecs === true) {
+    if (ecsFlag === true) {
       const clientIp = parseClientIp(c.req.raw.headers);
       if (clientIp) {
         const prefix =
           clientIp.family === 1 ? config.ipv4EcsPrefixLength : config.ipv6EcsPrefixLength;
         params.set("edns_client_subnet", formatEcsPrefix(clientIp, prefix));
       }
-    } else if (flags.ecs === false) {
+    } else if (ecsFlag === false) {
       params.delete("edns_client_subnet"); // privacy: never leak the subnet
     }
     const ecsSensitive = params.has("edns_client_subnet");
 
-    const family = flags.family === null ? config.upstreamFamily : flags.family;
+    // ── Answer-family flag: force type=A (v4) / type=AAAA (v6) ──
+    if (family !== "auto") {
+      const current = (params.get("type") ?? "").toUpperCase();
+      const target = family === "v4" ? "A" : "AAAA";
+      if (current === "" || current === "A" || current === "AAAA" || current === "ANY") {
+        params.set("type", target);
+      }
+    }
+
     const headers = new Headers();
     headers.set("Accept", JSON_MIME);
     headers.set("User-Agent", `vercel-doh/${config.appVersion}`);
 
     try {
-      const body = await fetchJsonWithFailover(config, upstreams, params, headers, family);
+      const body = await fetchJsonWithFailover(config, upstreams, params, headers);
       const out = new Headers(corsHeaders());
       out.set("Content-Type", "application/json");
       out.set("Cache-Control", ecsSensitive ? "no-store" : "public, s-maxage=300");
@@ -109,10 +128,8 @@ async function fetchJsonWithFailover(
   upstreams: string[],
   params: URLSearchParams,
   headers: Headers,
-  family: Family,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const attempts = Math.min(config.maxAttempts, upstreams.length);
-  const dispatcher = getDispatcher(family);
   let lastError: Error | null = null;
   for (let i = 0; i < attempts; i++) {
     const upstream = upstreams[i] as string;
@@ -126,9 +143,6 @@ async function fetchJsonWithFailover(
         headers,
         signal: controller.signal,
         redirect: "error", // SSRF: never follow redirects
-        // undici Agent vs Node's bundled undici-types: same object, distinct
-        // type worlds — the runtime contract is identical, so cast explicitly.
-        ...(dispatcher ? { dispatcher: dispatcher as unknown as never } : {}),
       });
       if (!res.ok) throw new UpstreamError(`upstream ${target.href} -> ${res.status}`);
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();

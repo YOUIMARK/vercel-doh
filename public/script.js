@@ -29,8 +29,24 @@ function flagPath(familySel, ecsSel) {
   return [familySel.value, ecsSel.value].filter(Boolean).join("/");
 }
 
+// Selecting an address family auto-switches the record type to match:
+// 仅IPv6 → AAAA, 仅IPv4 → A (when the type is an address type / ANY / empty).
+if (familySelect) {
+  familySelect.addEventListener("change", () => {
+    const type = (typeInput.value || "").trim().toUpperCase();
+    if (familySelect.value === "v6" && (type === "" || type === "A" || type === "ANY")) {
+      typeInput.value = "AAAA";
+    } else if (familySelect.value === "v4" && (type === "" || type === "AAAA" || type === "ANY")) {
+      typeInput.value = "A";
+    }
+  });
+}
+
 function renderEndpoint() {
-  const flags = flagPath(epFamily, epEcs);
+  const flags = flagPath(
+    epFamily || { value: "" },
+    epEcs || { value: "" },
+  );
   const endpoint = `${location.origin}${dohPath}${flags ? "/" + flags : ""}`;
   if (endpointCode) endpointCode.textContent = endpoint;
   return endpoint;
@@ -185,7 +201,7 @@ form.addEventListener("submit", async (event) => {
   if (doCheckbox.checked) params.set("do", "1");
   if (cdCheckbox.checked) params.set("cd", "1");
   // Apply the selected URL flags to this query (v4/v6/ecs/no-ecs).
-  const flags = flagPath(familySelect, ecsSelect);
+  const flags = flagPath(familySelect || { value: "" }, ecsSelect || { value: "" });
   const jsonPath = `/dns-query-json${flags ? "/" + flags : ""}`;
 
   results.replaceChildren(el("p", "placeholder", "查询中…"));

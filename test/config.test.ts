@@ -65,6 +65,17 @@ describe("UPSTREAM_FAMILY", () => {
   });
 });
 
+describe("SHOW_DOH_ENDPOINT", () => {
+  it("defaults to hidden (false)", () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).showDohEndpoint).toBe(false);
+  });
+
+  it("parses true/false", () => {
+    expect(loadConfig({ SHOW_DOH_ENDPOINT: "true" } as NodeJS.ProcessEnv).showDohEndpoint).toBe(true);
+    expect(loadConfig({ SHOW_DOH_ENDPOINT: "false" } as NodeJS.ProcessEnv).showDohEndpoint).toBe(false);
+  });
+});
+
 describe("DOMAIN_MAPPINGS validation", () => {
   it("accepts bare hosts and https URLs", () => {
     const cfg = loadConfig({

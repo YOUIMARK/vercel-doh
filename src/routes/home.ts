@@ -14,6 +14,41 @@ export function health() {
 export function homePage(config: DoHConfig) {
   return (): Response => {
     const dohEndpoint = config.dohPath;
+    // The DoH path is an obfuscation secret — the frontend only shows it when
+    // SHOW_DOH_ENDPOINT=true (default: hidden).
+    const endpointScript = config.showDohEndpoint
+      ? `<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>`
+      : "";
+    const endpointCard = config.showDohEndpoint
+      ? `<section class="card">
+    <h2>🛡 DoH 端点(配置到客户端)</h2>
+    <div class="endpoint-row">
+      <code class="endpoint" id="endpoint-code">…</code>
+      <button type="button" class="copy-btn" id="copy-endpoint">复制</button>
+    </div>
+    <div class="options" style="margin-top:0.7rem">
+      <label>地址族
+        <select id="ep-family">
+          <option value="">自动</option>
+          <option value="v4">仅 IPv4</option>
+          <option value="v6">仅 IPv6</option>
+        </select>
+      </label>
+      <label>ECS
+        <select id="ep-ecs">
+          <option value="">默认</option>
+          <option value="ecs">开启</option>
+          <option value="no-ecs">关闭</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
+    端点路径: <code>${dohEndpoint}</code> · 上方下拉会拼出带 flag 的端点(如 <code>${dohEndpoint}/v4/ecs</code>),URL 优先于环境变量;上方查询表单的「地址族/ECS」下拉作用于本次查询。</p>
+  </section>`
+      : `<section class="card">
+    <h2>🛡 DoH 端点</h2>
+    <p class="hint">端点为私有路径,已在前端隐藏。设置环境变量 <code>SHOW_DOH_ENDPOINT=true</code> 后可在此显示并生成客户端配置。</p>
+  </section>`;
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -22,7 +57,7 @@ export function homePage(config: DoHConfig) {
 <title>vercel-doh · DNS 查询</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 <link rel="stylesheet" href="/style.css">
-<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>
+${endpointScript}
 </head>
 <body>
 <div class="wrap">
@@ -71,31 +106,7 @@ export function homePage(config: DoHConfig) {
     </form>
   </section>
 
-  <section class="card">
-    <h2>🛡 DoH 端点(配置到客户端)</h2>
-    <div class="endpoint-row">
-      <code class="endpoint" id="endpoint-code">…</code>
-      <button type="button" class="copy-btn" id="copy-endpoint">复制</button>
-    </div>
-    <div class="options" style="margin-top:0.7rem">
-      <label>地址族
-        <select id="ep-family">
-          <option value="">自动</option>
-          <option value="v4">仅 IPv4</option>
-          <option value="v6">仅 IPv6</option>
-        </select>
-      </label>
-      <label>ECS
-        <select id="ep-ecs">
-          <option value="">默认</option>
-          <option value="ecs">开启</option>
-          <option value="no-ecs">关闭</option>
-        </select>
-      </label>
-    </div>
-    <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
-    端点路径: <code>${dohEndpoint}</code> · 上方下拉会拼出带 flag 的端点(如 <code>${dohEndpoint}/v4/ecs</code>),URL 优先于环境变量;上方查询表单的「地址族/ECS」下拉作用于本次查询。</p>
-  </section>
+  ${endpointCard}
 
   <section class="card">
     <h2>📋 查询结果</h2>

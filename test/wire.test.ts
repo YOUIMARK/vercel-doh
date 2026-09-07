@@ -6,7 +6,9 @@ import {
   encodeBase64Url,
   parseHeader,
   parseSections,
+  questionType,
   rcodeOf,
+  setQuestionType,
   skipName,
   toView,
 } from "../src/dns/wire";
@@ -71,6 +73,26 @@ describe("header / sections", () => {
   it("parseSections returns -1-safe nulls on truncation", () => {
     const q = buildQuery();
     expect(parseSections(q.subarray(0, 10))).toBeNull();
+  });
+});
+
+describe("question type helpers", () => {
+  it("reads the question QTYPE", () => {
+    expect(questionType(buildQuery())).toBe(1); // A
+    const aaaa = buildQuery({ question: buildQuestion("example.com", 28) });
+    expect(questionType(aaaa)).toBe(28);
+  });
+
+  it("rewrites the QTYPE (A → AAAA, AAAA → A)", () => {
+    const aaaa = buildQuery({ question: buildQuestion("example.com", 28) });
+    const rewritten = setQuestionType(aaaa, 1)!;
+    expect(questionType(rewritten)).toBe(1);
+    expect(questionType(setQuestionType(buildQuery(), 28)!)).toBe(28);
+  });
+
+  it("returns null for malformed or multi-question messages", () => {
+    expect(questionType(new Uint8Array([0, 1]))).toBeNull();
+    expect(setQuestionType(new Uint8Array([0, 1]), 1)).toBeNull();
   });
 });
 

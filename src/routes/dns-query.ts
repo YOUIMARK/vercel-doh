@@ -8,7 +8,7 @@ import { debugLog } from "../log.js";
 import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp } from "../dns/ecs.js";
 import { padResponse } from "../dns/padding.js";
 import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl.js";
-import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, rcodeOf } from "../dns/wire.js";
+import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, questionType, rcodeOf, setQuestionType } from "../dns/wire.js";
 import { buildUpstreamHeaders, queryUpstreams, resolveProvider, UpstreamError } from "../upstream.js";
 import { handleJsonQuery } from "./json.js";
 
@@ -77,9 +77,23 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     const acceptsMessage =
       accept === "" || accept === "*/*" || accept.includes(DNS_MESSAGE) || accept.includes("application/*");
 
-    // Browser-style GET with no dns param → explain the endpoint (or serve the JSON tool).
+    // Browser-style GET with no dns param → JSON query (name param), explain
+    // the endpoint, or serve the JSON tool.
     if (method === "GET" && !c.req.query("dns")) {
-      if (wantsJson) return handleJsonQuery(config)(c);
+      // A `name` param makes this a dns-json query (dns.google/resolve style),
+      // regardless of the Accept header the tool sends.
+      if (c.req.query("name") || wantsJson) {
+        const flags = parsePathFlags(c.req.path, config.dohPath);
+        return handleJsonQuery(config, {
+          family: flags.family,
+          ecs:
+            flags.behavior === "force_enable"
+              ? true
+              : flags.behavior === "force_disable"
+                ? false
+                : null,
+        })(c);
+      }
       if (acceptsMessage) return textError(400, "Missing dns parameter", corsHeaders());
       return infoText(config);
     }
@@ -153,6 +167,17 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       }
     }
 
+    // ── Answer-family flag: force the question type to A (v4) / AAAA (v6) ──
+    // Only rewrites address-type queries (A / AAAA / ANY); other types (MX…)
+    // pass through unchanged.
+    if (family !== "auto") {
+      const current = questionType(message);
+      if (current === 1 || current === 28 || current === 255) {
+        const rewritten = setQuestionType(message, family === "v4" ? 1 : 28);
+        if (rewritten) message = rewritten;
+      }
+    }
+
     // ── Upstream selection ──
     const ecsSensitive = incomingEcs || ecsAdded;
     let upstreamList =
@@ -182,7 +207,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
         const target = new URL(url);
         target.searchParams.set("dns", encoded);
         return { url: target.href, init: { method: "GET", headers: upstreamHeaders, signal } };
-      }, family);
+      });
 
       const upstreamBody = result.body;
       const resHeader = parseHeader(upstreamBody)!; // validated in upstream layer

@@ -35,8 +35,9 @@ vercel deploy --prod
 | 变量 | 默认值 | 建议 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 想多上游容错就逗号分隔,如 `https://cloudflare-dns.com/dns-query,https://dns.google/dns-query` |
-| `UPSTREAM_FAMILY` | `auto` | 上游连接地址族: `auto` / `v4`(仅 IPv4)/ `v6`(仅 IPv6);被 URL flag 覆盖 |
+| `UPSTREAM_FAMILY` | `auto` | 答案族: `auto`(不重写)/ `v4`(强制只查 A)/ `v6`(强制只查 AAAA);被 URL flag 覆盖 |
 | `DOH_PATH` | `/dns-query` | **路径混淆**: 改成随机路径段后,DoH 端点挂到新路径,标准 `/dns-query` 自动 404 |
+| `SHOW_DOH_ENDPOINT` | `false` | `true` 时前端显示并生成 DoH 端点 URL(默认隐藏,防泄露混淆路径) |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 带 ECS 的请求走这里 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | 网页工具的 dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 需要地域解析再开,会向上游泄露客户端子网 |
@@ -109,8 +110,8 @@ https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 **URL flags(按请求覆盖环境变量,URL 优先)**: 在端点路径后追加一个或多个 flag,
 顺序任意、可组合:
 ```text
-/v4        仅用 IPv4 连接上游(覆盖 UPSTREAM_FAMILY)
-/v6        仅用 IPv6 连接上游
+/v4        只返回 A 记录(代理把查询类型重写为 A;覆盖 UPSTREAM_FAMILY)
+/v6        只返回 AAAA 记录(重写为 AAAA)
 /ecs       强制附加 ECS(= /auto_ecs)
 /no-ecs    强制禁用 ECS(= /no_ecs)
 
@@ -120,14 +121,18 @@ https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 
 > ⚠️ 用**路径后缀**而非 query 参数: DoH GET 客户端会自己拼接 `?dns=...`,
 > query 里的 flag 会被拼坏(如 `?v4&ecs?dns=…`)。路径后缀与 RFC 8484 完全兼容。
+> ⚠️ v4/v6 = **答案族**(返回 A/AAAA),不是连接地址族——避免歧义。
 
-网页工具的 JSON API 同样支持 flag 后缀(作用于上游连接与子网注入):
-`/dns-query-json/v4/ecs`、`/dns-query-json/no-ecs` 等。
+网页工具的 JSON API 同样支持 flag 后缀(`/dns-query-json/v4/ecs` 等);
+**DoH 基路径也直接支持 JSON 查询**(`/{DOH_PATH}?name=...` 即 dns.google/resolve 风格,
+无需特定 Accept 头),基路径上的 flag 同样生效(如 `/{DOH_PATH}/v6?name=...`)。
 
 行为细节:
 - `DOH_PATH` 必须是**单个路径段**(`/xxx` 格式,字母/数字/`-`/`_`),非法值会在启动时报错
 - 设置后标准 `/dns-query`、`/dns-query/auto_ecs` 等**不再注册**,返回 404
-- 网页工具与信息页**自动**显示新端点(无需改前端);`/dns-query-json`、`/health`、`/` 保持固定路径
+- **前端默认隐藏端点路径**(路径混淆不泄露): 需设置 `SHOW_DOH_ENDPOINT=true`
+  后,网页工具才会显示并生成带 flag 的客户端端点 URL;
+  `/dns-query-json`、`/health`、`/` 保持固定路径
 - 未设置时行为不变(默认 `/dns-query`)
 
 > ⚠️ 混淆≠安全,只是把端点从「公开约定路径」变成「不易被发现」。

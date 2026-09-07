@@ -140,6 +140,35 @@ export function countOptRrs(msg: Uint8Array): number {
   return parsed.additional.rrs.filter((rr) => rr.rrType === 41).length;
 }
 
+/** Reads the QTYPE of the (single) question, or null when absent/unparseable. */
+export function questionType(msg: Uint8Array): number | null {
+  const header = parseHeader(msg);
+  if (!header || header.qd !== 1) return null;
+  const view = toView(msg);
+  const nameEnd = skipName(view, 12);
+  if (nameEnd === -1 || nameEnd + 4 > msg.length) return null;
+  return view.getUint16(nameEnd);
+}
+
+/**
+ * Returns a copy of `msg` with the question QTYPE rewritten (used for the
+ * v4/v6 answer-family flags). Returns null when the message has no single
+ * parseable question.
+ */
+export function setQuestionType(
+  msg: Uint8Array<ArrayBuffer>,
+  qtype: number,
+): Uint8Array<ArrayBuffer> | null {
+  const header = parseHeader(msg);
+  if (!header || header.qd !== 1) return null;
+  const view = toView(msg);
+  const nameEnd = skipName(view, 12);
+  if (nameEnd === -1 || nameEnd + 4 > msg.length) return null;
+  const out = new Uint8Array(msg);
+  toView(out).setUint16(nameEnd, qtype);
+  return out;
+}
+
 /** Builds a minimal DNS response header + echoed question with the given RCODE. */
 export function buildErrorResponse(query: Uint8Array<ArrayBuffer> | null, rcode: number): Uint8Array<ArrayBuffer> {
   const queryHeader = query ? parseHeader(query) : null;

@@ -31,11 +31,15 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   XFF 最右段),过滤私网/保留地址,**不信任可伪造的最左段**
 - **路径映射(可选)**: `/dns-query/{provider}` 经 `DOMAIN_MAPPINGS` 路由到指定上游
 - **URL flags(按请求覆盖环境变量)**: 在端点路径后追加
-  `/v4`(仅 IPv4)/`/v6`(仅 IPv6)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS),
+  `/v4`(只返回 A 记录)/`/v6`(只返回 AAAA 记录)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS),
   可组合且顺序任意,如 `/dns-query/v4/ecs`、`/dns-query/v6/google`;URL 优先于环境变量
+  (v4/v6 = **答案族**: 代理把查询类型重写为 A/AAAA,而非限制连接地址)
 - **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
-  同样支持 flag 后缀,如 `/dns-query-json/v4/ecs`(v4 = 仅 IPv4 连接上游,
-  ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数)
+  **DoH 基路径同样支持 JSON 查询**(`/youimark?name=...` 即 dns.google/resolve 风格,
+  无需特定 Accept);flag 后缀同样生效,如 `/dns-query-json/v4/ecs`
+  (ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数)
+- **隐私**: 前端**默认隐藏 DoH 端点路径**(路径混淆不泄露);设置
+  `SHOW_DOH_ENDPOINT=true` 后前端才显示并可生成客户端端点 URL
 - **代理卫生**: 请求体上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)
 
 ## 快速开始
@@ -77,8 +81,9 @@ curl -X POST --data-binary @query.bin \
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 常规上游,逗号分隔(顺序转移) |
-| `UPSTREAM_FAMILY` | `auto` | 上游连接地址族: `auto`(默认)/ `v4`(仅 IPv4)/ `v6`(仅 IPv6);可用 URL flag 覆盖 |
+| `UPSTREAM_FAMILY` | `auto` | 答案族: `auto`(默认,不重写)/ `v4`(强制只查 A)/ `v6`(强制只查 AAAA);可用 URL flag 覆盖 |
 | `DOH_PATH` | `/dns-query` | DoH 端点路径。改成随机路径(如 `/3f9a2b7c`)即路径混淆,标准路径自动 404 |
+| `SHOW_DOH_ENDPOINT` | `false` | `true` 时前端显示 DoH 端点路径并生成客户端 URL(默认隐藏,防泄露混淆路径) |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 请求带 ECS 时使用的上游 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | dns-json 上游 |
 | `AUTO_ADD_ECS` | `false` | 全局自动附加 ECS(默认关,隐私) |
@@ -95,8 +100,9 @@ curl -X POST --data-binary @query.bin \
 ## 测试
 
 ```bash
-npm test          # vitest,71 个用例: wire/ecs/ttl/padding/cache-control/upstream/routes
+npm test          # vitest 全量(147 个用例)
 npx tsc --noEmit  # 严格类型检查
+npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展名会报 TS2835)
 ```
 
 关键回归用例:
