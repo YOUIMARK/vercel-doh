@@ -35,11 +35,17 @@ function looksLikeIp(value) {
 function flagPath(familySel, ecsSel, ecsIpSel) {
   const family = familySel.value;
   const ecs = ecsSel.value;
-  // ECS IP override only applies when ECS is explicitly ON (关闭/默认 → inert).
-  const ecsFlag =
-    ecs === "ecs" && ecsIpSel && ecsIpSel.value && looksLikeIp(ecsIpSel.value.trim())
-      ? `ecs-${ecsIpSel.value.trim()}`
-      : ecs;
+  const overrideIp = ecsIpSel && ecsIpSel.value ? ecsIpSel.value.trim() : "";
+  // Filling the ECS IP override AUTO-ENABLES ECS (ecs-<ip> forces it on) —
+  // unless ECS is explicitly set to 关闭, in which case the override is inert.
+  let ecsFlag;
+  if (ecs === "no-ecs") {
+    ecsFlag = "no-ecs";
+  } else if (overrideIp && looksLikeIp(overrideIp)) {
+    ecsFlag = `ecs-${overrideIp}`;
+  } else {
+    ecsFlag = ecs;
+  }
   return [family, ecsFlag].filter(Boolean).join("/");
 }
 

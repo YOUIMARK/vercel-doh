@@ -43,6 +43,7 @@ vercel deploy --prod
 | `AUTO_ADD_ECS` | `false` | 需要地域解析再开,会向上游泄露客户端子网 |
 | `ECS_OVERRIDE_IP` | 空 | 固定 ECS 源 IP(如 `8.8.8.8`)。**仅当 ECS 开启时生效**,no-ecs 时失效;URL `ecs-<IP>` 优先 |
 | `CACHE_MAX_AGE` | `300` | GET 缓存 s-maxage 上限(秒) |
+| `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 随机块长填充(128/256/512 随机选块对齐,防流量分析;响应无 OPT 时自动追加) |
 | `RACE_UPSTREAMS` | `false` | `true` = 并发竞速(最快者胜,牺牲隐私) |
 | `UPSTREAM_TIMEOUT_MS` | `3000` | 单上游超时 |
 | `DOMAIN_MAPPINGS` | `{}` | 路径映射,如 `{"google":{"targetDomain":"dns.google"}}` |

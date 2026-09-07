@@ -42,7 +42,7 @@ export function homePage(config: DoHConfig) {
         </select>
       </label>
       <label>ECS IP 覆盖
-        <input type="text" id="ep-ecs-ip" placeholder="可选,如 8.8.8.8" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <input type="text" id="ep-ecs-ip" placeholder="可选,如 8.8.8.8(填写即自动开启 ECS)" autocomplete="off" autocapitalize="none" spellcheck="false">
       </label>
     </div>
     <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
@@ -99,7 +99,7 @@ ${endpointScript}
           </select>
         </label>
         <label>ECS IP 覆盖
-          <input type="text" id="opt-ecs-ip" placeholder="可选,如 8.8.8.8" autocomplete="off" autocapitalize="none" spellcheck="false">
+          <input type="text" id="opt-ecs-ip" placeholder="可选,如 8.8.8.8(填写即自动开启 ECS)" autocomplete="off" autocapitalize="none" spellcheck="false">
         </label>
         <label><input type="checkbox" id="opt-do"> DNSSEC OK (DO)</label>
         <label><input type="checkbox" id="opt-cd"> 禁用 DNSSEC 校验 (CD)</label>

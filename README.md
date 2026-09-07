@@ -95,7 +95,7 @@ curl -X POST --data-binary @query.bin \
 | `CACHE_MAX_AGE` | `300` | GET 缓存 `s-maxage` 上限(秒) |
 | `RACE_UPSTREAMS` | `false` | `true` 时并发竞速所有上游(最快者胜,牺牲隐私换延迟) |
 | `UPSTREAM_TIMEOUT_MS` | `3000` | 单上游超时(500–30000) |
-| `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 响应填充(并入响应 OPT RR) |
+| `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 响应填充(**Random-Block-Length**: 每次随机选 128/256/512 字节块对齐,防流量分析;响应无 OPT RR 时自动追加) |
 | `DOMAIN_MAPPINGS` | `{}` | 路径映射 JSON,如 `{"google":{"targetDomain":"dns.google"}}` |
 | `DEBUG_LOGGING` | `false` | 输出调试日志(注意: 不打印查询内容) |
 | `APP_VERSION` | `1.0.0` | 信息页展示的版本号 |
