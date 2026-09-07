@@ -5,20 +5,10 @@ import type { DoHConfig } from "../config";
 import { buildCacheControl } from "../cache-control";
 import { corsHeaders, servfailResponse, textError } from "../errors";
 import { debugLog } from "../log";
-import {
-  addOrMergeEcs,
-  buildEcsOption,
-  hasMeaningfulEcs,
-  parseClientIp,
-} from "../dns/ecs";
+import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp } from "../dns/ecs";
 import { padResponse } from "../dns/padding";
-import { minTtl } from "../dns/ttl";
-import {
-  decodeBase64Url,
-  encodeBase64Url,
-  parseHeader,
-  rcodeOf,
-} from "../dns/wire";
+import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl";
+import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, rcodeOf } from "../dns/wire";
 import { buildUpstreamHeaders, queryUpstreams, resolveProvider, UpstreamError } from "../upstream";
 import { handleJsonQuery } from "./json";
 
@@ -48,18 +38,23 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       return textError(405, "Method Not Allowed: only GET/POST supported", corsHeaders());
     }
 
-    const accept = c.req.header("accept") ?? "";
-    const wantsMessage = accept.includes(DNS_MESSAGE);
+    // Media-type negotiation: RFC 8484 says clients SHOULD send Accept, not
+    // MUST. Absent or `*/*` Accept headers are treated as accepting
+    // application/dns-message.
+    const accept = (c.req.header("accept") ?? "").trim();
+    const wantsJson =
+      accept.includes("application/dns-json") || c.req.query("ct") === "application/dns-json";
+    const acceptsMessage =
+      accept === "" || accept === "*/*" || accept.includes(DNS_MESSAGE) || accept.includes("application/*");
 
-    // Browser-style GET with no dns param and no DoH accept → explain the endpoint.
+    // Browser-style GET with no dns param → explain the endpoint (or serve the JSON tool).
     if (method === "GET" && !c.req.query("dns")) {
-      const wantsJson = accept.includes("application/dns-json") || c.req.query("ct") === "application/dns-json";
       if (wantsJson) return handleJsonQuery(config)(c);
-      if (!wantsMessage) return infoText(config);
-      return textError(400, "Missing dns parameter", corsHeaders());
+      if (acceptsMessage) return textError(400, "Missing dns parameter", corsHeaders());
+      return infoText(config);
     }
 
-    if (method === "GET" && !wantsMessage) {
+    if (method === "GET" && !acceptsMessage) {
       return textError(406, "Not Acceptable: application/dns-message required", corsHeaders());
     }
 
@@ -83,12 +78,30 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       return textError(413, "Payload Too Large", corsHeaders());
     }
 
+    // ── Query validation (protocol gate before touching any upstream) ──
+    const queryHeader = parseHeader(message);
+    if (!queryHeader || queryHeader.qd !== 1) {
+      return textError(400, "Invalid DNS query (exactly one question required)", corsHeaders());
+    }
+    if (parseSections(message) === null) {
+      return textError(400, "Malformed DNS query", corsHeaders());
+    }
+    if (countOptRrs(message) > 1) {
+      return textError(400, "Malformed DNS query (multiple OPT RRs)", corsHeaders());
+    }
+    const ecs = ecsStatus(message);
+    if (ecs === "malformed") {
+      return textError(400, "Malformed EDNS/ECS option", corsHeaders());
+    }
+
     // ── ECS handling (privacy: only when explicitly enabled) ──
-    const hasEcsInitially = hasMeaningfulEcs(message);
+    // ECS with source prefix 0 is a client's explicit "do not disclose my
+    // address" signal — never inject the real subnet over it.
+    const incomingEcs = ecs !== "absent";
     const shouldAddEcs =
       behavior === "force_enable" || (behavior === "default" && config.autoAddEcs);
     let ecsAdded = false;
-    if (shouldAddEcs && !hasEcsInitially) {
+    if (shouldAddEcs && ecs === "absent") {
       const clientIp = parseClientIp(c.req.raw.headers);
       if (clientIp) {
         const prefix =
@@ -102,9 +115,11 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     }
 
     // ── Upstream selection ──
-    const hasEcs = hasEcsInitially || ecsAdded;
+    const ecsSensitive = incomingEcs || ecsAdded;
     let upstreamList =
-      hasEcs && config.ecsUpstreamUrls.length > 0 ? config.ecsUpstreamUrls : config.upstreamUrls;
+      ecsSensitive && config.ecsUpstreamUrls.length > 0
+        ? config.ecsUpstreamUrls
+        : config.upstreamUrls;
     const provider = providerFromPath(c.req.path, config.dohPath);
     if (provider) {
       const mapped = resolveProvider(config, provider);
@@ -112,11 +127,16 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       upstreamList = [mapped];
     }
 
-    const upstreamHeaders = buildUpstreamHeaders(c.req.raw.headers, DNS_MESSAGE);
+    const upstreamHeaders = buildUpstreamHeaders(
+      DNS_MESSAGE,
+      `vercel-doh/${config.appVersion}`,
+      method === "POST" ? DNS_MESSAGE : undefined,
+    );
     const encoded = encodeBase64Url(message);
 
     try {
-      const res = await queryUpstreams(config, upstreamList, (url, signal) => {
+      // queryUpstreams resolves only with a validated, fully-read DNS payload.
+      const result = await queryUpstreams(config, upstreamList, (url, signal) => {
         if (method === "POST") {
           return { url, init: { method: "POST", headers: upstreamHeaders, body: message, signal } };
         }
@@ -125,19 +145,20 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
         return { url: target.href, init: { method: "GET", headers: upstreamHeaders, signal } };
       });
 
-      const upstreamBody = new Uint8Array(await res.arrayBuffer());
-      const header = parseHeader(upstreamBody);
-      const rcode = header ? rcodeOf(header.flags) : -1;
-      const ttl = minTtl(upstreamBody);
+      const upstreamBody = result.body;
+      const resHeader = parseHeader(upstreamBody)!; // validated in upstream layer
+      const rcode = rcodeOf(resHeader.flags);
 
       let finalBody = upstreamBody;
       if (config.forceResponsePadding) finalBody = padResponse(upstreamBody);
 
       const cacheControl = buildCacheControl({
         method,
+        validResponse: true,
         rcode,
-        ecsAdded,
-        minTtl: ttl,
+        ecsSensitive,
+        minAnswerTtl: minAnswerTtl(upstreamBody),
+        negativeTtl: soaNegativeTtl(upstreamBody),
         cacheMaxAge: config.cacheMaxAge,
       });
 
@@ -145,8 +166,8 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       headers.set("Content-Type", DNS_MESSAGE);
       headers.set("Cache-Control", cacheControl);
       headers.set("Content-Length", String(finalBody.length));
-      debugLog(`dns-query ${method} rcode=${rcode} ttl=${ttl} cache=${cacheControl}`);
-      return new Response(finalBody, { status: res.status, headers });
+      debugLog(`dns-query ${method} rcode=${rcode} cache=${cacheControl}`);
+      return new Response(finalBody, { status: 200, headers });
     } catch (err) {
       if (err instanceof UpstreamError) {
         debugLog("all upstreams failed");

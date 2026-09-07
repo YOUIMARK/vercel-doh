@@ -1,9 +1,13 @@
 // EDNS Client Subnet (ECS, RFC 7871) handling.
-// Key correctness rule: a DNS message must never contain two OPT RRs.
-// If an OPT RR already exists we merge the ECS option into its RDATA;
-// we only append a new OPT RR when the message has none.
+//
+// Key correctness rules:
+//  1. A DNS message must never contain two OPT RRs (RFC 6891).
+//  2. ECS source prefix 0 is a VALID ECS meaning "don't provide client
+//     address info" — it must never be treated as "no ECS" and overridden
+//     with the real client subnet.
+//  3. Malformed ECS options must be rejected, not silently ignored.
 
-import { parseSections, toView } from "./wire";
+import { countOptRrs, parseSections, toView } from "./wire";
 import { isPrivateOrReserved, parseIp, type IpAddress } from "./ip";
 import { debugLog } from "../log";
 
@@ -12,6 +16,53 @@ export const OPT_RR_TYPE = 41; // EDNS(0)
 
 const FAMILY_IPV4 = 1;
 const FAMILY_IPV6 = 2;
+
+export type EcsStatus = "absent" | "zero" | "positive" | "malformed";
+
+/**
+ * Classifies the ECS state of a message:
+ *  - "absent":     no ECS option (auto-injection is allowed by policy)
+ *  - "zero":       ECS with source prefix 0 (client explicitly opts out of
+ *                  address disclosure — never inject over it)
+ *  - "positive":   ECS with source prefix > 0 (client-provided subnet)
+ *  - "malformed":  broken OPT/ECS structure (must be rejected)
+ */
+export function ecsStatus(msg: Uint8Array): EcsStatus {
+  const parsed = parseSections(msg);
+  if (!parsed) return "malformed";
+  if (countOptRrs(msg) > 1) return "malformed"; // RFC 6891: at most one OPT
+
+  const view = toView(msg);
+  let sawEcs = false;
+  let status: "zero" | "positive" | null = null;
+
+  for (const opt of parsed.additional.rrs) {
+    if (opt.rrType !== OPT_RR_TYPE) continue;
+    const end = opt.rdataOffset + opt.rdLength;
+    let o = opt.rdataOffset;
+    while (o + 4 <= end) {
+      const code = view.getUint16(o);
+      const len = view.getUint16(o + 2);
+      if (o + 4 + len > end) return "malformed"; // option overruns RDATA
+      if (code === ECS_OPTION_CODE) {
+        if (sawEcs) return "malformed"; // duplicate ECS option
+        sawEcs = true;
+        if (len < 4) return "malformed";
+        const family = view.getUint16(o + 4);
+        const sourcePrefix = view.getUint8(o + 6);
+        if (family !== FAMILY_IPV4 && family !== FAMILY_IPV6) return "malformed";
+        const bits = family === FAMILY_IPV4 ? 32 : 128;
+        if (sourcePrefix > bits) return "malformed";
+        if (len !== 4 + Math.ceil(sourcePrefix / 8)) return "malformed";
+        status = sourcePrefix === 0 ? "zero" : "positive";
+      }
+      o += 4 + len;
+    }
+  }
+
+  if (sawEcs) return status ?? "malformed";
+  return "absent";
+}
 
 /** Builds the ECS option wire bytes (option code + option data). */
 export function buildEcsOption(ip: IpAddress, prefixLength: number): Uint8Array<ArrayBuffer> {
@@ -30,40 +81,12 @@ export function buildEcsOption(ip: IpAddress, prefixLength: number): Uint8Array<
   return out;
 }
 
-/** Returns true when the message already carries a meaningful (non-zero prefix) ECS option. */
-export function hasMeaningfulEcs(msg: Uint8Array): boolean {
-  const opt = findOptRr(msg);
-  if (!opt) return false;
-  const view = toView(msg);
-  const end = opt.rdataOffset + opt.rdLength;
-  let o = opt.rdataOffset;
-  while (o + 4 <= end) {
-    const code = view.getUint16(o);
-    const len = view.getUint16(o + 2);
-    if (o + 4 + len > end) return false; // malformed option
-    if (code === ECS_OPTION_CODE && len >= 4) {
-      const family = view.getUint16(o + 4);
-      const sourcePrefix = view.getUint8(o + 6);
-      if (sourcePrefix > 0 && (family === FAMILY_IPV4 || family === FAMILY_IPV6)) return true;
-    }
-    o += 4 + len;
-  }
-  return false;
-}
-
-/** Locates the OPT RR in the ADDITIONAL section, or null when absent/malformed. */
-function findOptRr(msg: Uint8Array) {
-  const parsed = parseSections(msg);
-  if (!parsed) return null;
-  const opt = parsed.additional.rrs.find((rr) => rr.rrType === OPT_RR_TYPE);
-  return opt ?? null;
-}
-
 /**
  * Adds the given ECS option to the message:
  *  - merges into the existing OPT RR's RDATA when one exists (ARCOUNT unchanged);
  *  - appends a brand-new OPT RR otherwise (ARCOUNT + 1).
  * Returns the original message unchanged on any malformed input.
+ * Callers MUST only invoke this when ecsStatus(msg) === "absent".
  */
 export function addOrMergeEcs(
   msg: Uint8Array<ArrayBuffer>,

@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   addOrMergeEcs,
   buildEcsOption,
-  hasMeaningfulEcs,
+  ecsStatus,
   parseClientIp,
 } from "../src/dns/ecs";
-import { parseHeader, parseSections, toView } from "../src/dns/wire";
-import { buildOptRr, buildQuery } from "./helpers";
+import { countOptRrs, parseHeader, parseSections } from "../src/dns/wire";
+import { buildOptRr, buildQuery, concat } from "./helpers";
 
 const IP_V4 = { family: 1 as const, addressBytes: new Uint8Array([1, 2, 3, 4]) };
 
-function countOptRrs(msg: Uint8Array): number {
+function countOptRrsIn(msg: Uint8Array): number {
   const sections = parseSections(msg);
   if (!sections) return -1;
   return sections.additional.rrs.filter((rr) => rr.rrType === 41).length;
@@ -29,22 +29,60 @@ describe("buildEcsOption", () => {
   });
 });
 
-describe("hasMeaningfulEcs", () => {
-  it("returns true when the OPT carries a non-zero-prefix ECS", () => {
-    const ecsOption = buildEcsOption(IP_V4, 24);
-    const msg = buildQuery({ additional: buildOptRr(ecsOption) });
-    expect(hasMeaningfulEcs(msg)).toBe(true);
+describe("ecsStatus", () => {
+  it("returns absent when there is no OPT RR or no ECS", () => {
+    expect(ecsStatus(buildQuery())).toBe("absent");
+    const nsidOpt = buildOptRr(new Uint8Array([0, 3, 0, 2, 65, 65])); // NSID "AA"
+    expect(ecsStatus(buildQuery({ additional: nsidOpt }))).toBe("absent");
   });
 
-  it("returns false when the OPT has no ECS or zero prefix", () => {
-    const plainOpt = buildOptRr(new Uint8Array([0, 3, 0, 2, 65, 65])); // NSID "AA"
-    expect(hasMeaningfulEcs(buildQuery({ additional: plainOpt }))).toBe(false);
-    const zeroPrefix = buildEcsOption({ family: 1, addressBytes: new Uint8Array([1, 2, 3, 4]) }, 0);
-    expect(hasMeaningfulEcs(buildQuery({ additional: buildOptRr(zeroPrefix) }))).toBe(false);
+  it("returns positive for a non-zero-prefix ECS", () => {
+    const msg = buildQuery({ additional: buildOptRr(buildEcsOption(IP_V4, 24)) });
+    expect(ecsStatus(msg)).toBe("positive");
   });
 
-  it("returns false when there is no OPT RR", () => {
-    expect(hasMeaningfulEcs(buildQuery())).toBe(false);
+  it("returns zero for ECS source prefix 0 (client opts out — must NOT inject)", () => {
+    const zeroEcs = buildEcsOption({ family: 1, addressBytes: new Uint8Array([1, 2, 3, 4]) }, 0);
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(zeroEcs) }))).toBe("zero");
+  });
+
+  it("returns malformed for truncated / over-long ECS options", () => {
+    // Valid /24 option is 11 bytes; truncate the address to 2 bytes.
+    const truncated = new Uint8Array([0, 8, 0, 6, 0, 1, 24, 0, 1, 2]);
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(truncated) }))).toBe("malformed");
+    // Valid /24 option is 11 bytes; pad the address to 4 bytes.
+    const overlong = new Uint8Array([0, 8, 0, 8, 0, 1, 24, 0, 1, 2, 3, 4]);
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(overlong) }))).toBe("malformed");
+  });
+
+  it("returns malformed for invalid family or oversized prefix", () => {
+    const badFamily = new Uint8Array([0, 8, 0, 7, 0, 9, 24, 0, 1, 2, 3]); // family 9
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(badFamily) }))).toBe("malformed");
+    const badPrefix = new Uint8Array([0, 8, 0, 8, 0, 1, 40, 0, 1, 2, 3, 4]); // /40 > /32
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(badPrefix) }))).toBe("malformed");
+  });
+
+  it("returns malformed for duplicate ECS options", () => {
+    const two = concat([
+      buildEcsOption(IP_V4, 24),
+      buildEcsOption(IP_V4, 16),
+    ]);
+    expect(ecsStatus(buildQuery({ additional: buildOptRr(two) }))).toBe("malformed");
+  });
+
+  it("returns malformed when the message carries multiple OPT RRs", () => {
+    const msg = buildQuery({ additional: concat([buildOptRr(new Uint8Array(0)), buildOptRr(new Uint8Array(0))]), ar: 2 });
+    expect(countOptRrs(msg)).toBe(2);
+    expect(ecsStatus(msg)).toBe("malformed");
+  });
+});
+
+describe("countOptRrs", () => {
+  it("counts OPT RRs in the additional section", () => {
+    expect(countOptRrs(buildQuery())).toBe(0);
+    expect(countOptRrs(buildQuery({ additional: buildOptRr(new Uint8Array(0)) }))).toBe(1);
+    const two = concat([buildOptRr(new Uint8Array(0)), buildOptRr(new Uint8Array(0))]);
+    expect(countOptRrs(buildQuery({ additional: two, ar: 2 }))).toBe(2);
   });
 });
 
@@ -54,8 +92,8 @@ describe("addOrMergeEcs", () => {
     const merged = addOrMergeEcs(msg, buildEcsOption(IP_V4, 24));
     const header = parseHeader(merged)!;
     expect(header.ar).toBe(1);
-    expect(countOptRrs(merged)).toBe(1);
-    expect(hasMeaningfulEcs(merged)).toBe(true);
+    expect(countOptRrsIn(merged)).toBe(1);
+    expect(ecsStatus(merged)).toBe("positive");
   });
 
   it("merges into the existing OPT RR without adding a second one", () => {
@@ -68,13 +106,13 @@ describe("addOrMergeEcs", () => {
     const after = parseHeader(merged)!;
     // CRITICAL: exactly one OPT RR, ARCOUNT unchanged.
     expect(after.ar).toBe(1);
-    expect(countOptRrs(merged)).toBe(1);
-    expect(hasMeaningfulEcs(merged)).toBe(true);
+    expect(countOptRrsIn(merged)).toBe(1);
+    expect(ecsStatus(merged)).toBe("positive");
 
     // Original NSID option must still be present inside the same OPT RR.
     const sections = parseSections(merged)!;
     const opt = sections.additional.rrs.find((rr) => rr.rrType === 41)!;
-    const view = toView(merged);
+    const view = new DataView(merged.buffer, merged.byteOffset, merged.byteLength);
     let o = opt.rdataOffset;
     const end = opt.rdataOffset + opt.rdLength;
     const codes: number[] = [];

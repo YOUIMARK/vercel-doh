@@ -133,26 +133,29 @@ export function decodeBase64Url(s: string): Uint8Array<ArrayBuffer> | null {
   }
 }
 
+/** Counts OPT RRs in the ADDITIONAL section (RFC 6891: at most one allowed). */
+export function countOptRrs(msg: Uint8Array): number {
+  const parsed = parseSections(msg);
+  if (!parsed) return 0;
+  return parsed.additional.rrs.filter((rr) => rr.rrType === 41).length;
+}
+
 /** Builds a minimal DNS response header + echoed question with the given RCODE. */
-export function buildErrorResponse(query: Uint8Array | null, rcode: number): Uint8Array<ArrayBuffer> {
+export function buildErrorResponse(query: Uint8Array<ArrayBuffer> | null, rcode: number): Uint8Array<ArrayBuffer> {
   const queryHeader = query ? parseHeader(query) : null;
   const id = queryHeader?.id ?? 0;
   const rd = queryHeader ? (queryHeader.flags & 0x0100) !== 0 : false;
   // QR | RA | RCODE, plus RD echoed from the query.
   const flags = 0x8000 | 0x0080 | (rd ? 0x0100 : 0) | (rcode & 0x0f);
-  const qd = queryHeader?.qd ?? 0;
 
-  let questionBytes: Uint8Array;
+  // Only echo the question when it is structurally present; QDCOUNT must
+  // match the actual question bytes (never a header/body mismatch).
+  let questionBytes = new Uint8Array(0);
   if (query && queryHeader && queryHeader.qd > 0) {
     const sections = parseSections(query);
-    if (sections) {
-      questionBytes = query.subarray(12, sections.questionEnd);
-    } else {
-      questionBytes = new Uint8Array(0);
-    }
-  } else {
-    questionBytes = new Uint8Array(0);
+    if (sections) questionBytes = query.subarray(12, sections.questionEnd);
   }
+  const qd = questionBytes.length > 0 ? (queryHeader?.qd ?? 0) : 0;
 
   const out = new Uint8Array(12 + questionBytes.length);
   const view = toView(out);

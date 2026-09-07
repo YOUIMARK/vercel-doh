@@ -8,6 +8,7 @@ import {
   resolveProvider,
   UpstreamError,
 } from "../src/upstream";
+import { buildQuery, buildResponse } from "./helpers";
 
 function config(overrides: Record<string, string> = {}) {
   return loadConfig({
@@ -16,7 +17,23 @@ function config(overrides: Record<string, string> = {}) {
   } as NodeJS.ProcessEnv);
 }
 
-const ok = () => new Response(new Uint8Array([0, 1, 2, 3, 4]), { status: 200 });
+/** A valid DNS response body (QR=1, one answer, TTL 300). */
+const VALID_BODY = buildResponse(buildQuery(), { ttl: 300 });
+
+const validResponse = (status = 200) =>
+  new Response(VALID_BODY, {
+    status,
+    headers: { "content-type": "application/dns-message" },
+  });
+
+const badContentType = () =>
+  new Response(VALID_BODY, { status: 200, headers: { "content-type": "text/html" } });
+
+const badBody = () =>
+  new Response("<html>not dns</html>", {
+    status: 200,
+    headers: { "content-type": "application/dns-message" },
+  });
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -52,8 +69,11 @@ describe("resolveProvider", () => {
     expect(resolveProvider(cfg, "cf")).toBe("https://cloudflare-dns.com/dns-query");
   });
 
-  it("returns null for unknown providers", () => {
-    expect(resolveProvider(config(), "nope")).toBeNull();
+  it("returns null for unknown providers and prototype properties", () => {
+    const cfg = config();
+    expect(resolveProvider(cfg, "nope")).toBeNull();
+    expect(resolveProvider(cfg, "toString")).toBeNull();
+    expect(resolveProvider(cfg, "constructor")).toBeNull();
   });
 });
 
@@ -63,25 +83,40 @@ describe("sequential failover (default, no broadcast)", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock
       .mockRejectedValueOnce(new TypeError("network down"))
-      .mockResolvedValueOnce(ok());
+      .mockResolvedValueOnce(validResponse());
 
-    const res = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
-    expect(res.status).toBe(200);
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(VALID_BODY);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[0]![0])).toContain("up1");
     expect(String(fetchMock.mock.calls[1]![0])).toContain("up2");
   });
 
-  it("fails over on 5xx but returns 4xx as-is", async () => {
+  it("fails over on 5xx and 4xx statuses", async () => {
     const cfg = config();
     const fetchMock = vi.mocked(fetch);
     fetchMock
       .mockResolvedValueOnce(new Response("err", { status: 503 }))
-      .mockResolvedValueOnce(new Response("err", { status: 400 }));
+      .mockResolvedValueOnce(new Response("err", { status: 400 }))
+      .mockResolvedValueOnce(validResponse());
 
-    const res = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
-    expect(res.status).toBe(400);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // 503 → next; 400 returned directly
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    expect(result.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // 503 and 400 failed over
+  });
+
+  it("fails over on wrong content-type and malformed bodies", async () => {
+    const cfg = config();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(badContentType())
+      .mockResolvedValueOnce(badBody())
+      .mockResolvedValueOnce(validResponse());
+
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    expect(result.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("throws UpstreamError when every upstream fails", async () => {
@@ -94,33 +129,27 @@ describe("sequential failover (default, no broadcast)", () => {
 
   it("never exceeds maxAttempts (no broadcast beyond the cap)", async () => {
     const cfg = config();
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockRejectedValue(new TypeError("down"));
+    vi.mocked(fetch).mockRejectedValue(new TypeError("down"));
     await expect(
       queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } })),
     ).rejects.toBeInstanceOf(UpstreamError);
-    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(vi.mocked(fetch).mock.calls.length).toBeLessThanOrEqual(3);
   });
 });
 
 describe("race mode", () => {
-  it("resolves with the fastest successful response", async () => {
+  it("resolves with the fastest valid response and forces redirect:error", async () => {
     const cfg = config({ RACE_UPSTREAMS: "true" });
     const fetchMock = vi.mocked(fetch);
-    let resolveSlow!: (r: Response) => void;
-    fetchMock
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveSlow = resolve;
-          }),
-      ) // up1: slow
-      .mockResolvedValueOnce(ok()); // up2: fast
+    fetchMock.mockImplementation(async (_url, init) => {
+      expect((init as RequestInit).redirect).toBe("error");
+      return validResponse();
+    });
 
-    const res = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
-    expect(res.status).toBe(200);
-    resolveSlow(ok()); // settle the loser afterwards
-    await Promise.resolve();
+    const result = await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(VALID_BODY);
+    expect(fetchMock.mock.calls.length).toBe(3); // raced all three
   });
 
   it("rejects when all upstreams return 5xx", async () => {
@@ -130,27 +159,39 @@ describe("race mode", () => {
       UpstreamError,
     );
   });
+
+  it("rejects when upstreams return invalid DNS bodies", async () => {
+    const cfg = config({ RACE_UPSTREAMS: "true" });
+    vi.mocked(fetch).mockResolvedValue(badBody());
+    await expect(queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }))).rejects.toBeInstanceOf(
+      UpstreamError,
+    );
+  });
 });
 
-describe("buildUpstreamHeaders", () => {
-  it("strips hop-by-hop and privacy headers, forces DoH Accept", () => {
-    const incoming = new Headers({
-      Host: "proxy.example",
-      Connection: "keep-alive",
-      "Keep-Alive": "timeout=5",
-      "X-Forwarded-For": "1.2.3.4",
-      "X-Real-Ip": "1.2.3.4",
-      "X-Vercel-Forwarded-For": "1.2.3.4",
-      "User-Agent": "doh-client",
-      Accept: "application/dns-json",
+describe("redirect hardening", () => {
+  it("never follows redirects in sequential mode", async () => {
+    const cfg = config();
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      expect((init as RequestInit).redirect).toBe("error");
+      return validResponse();
     });
-    const out = buildUpstreamHeaders(incoming, "application/dns-message");
-    expect(out.get("x-forwarded-for")).toBeNull();
-    expect(out.get("x-real-ip")).toBeNull();
-    expect(out.get("x-vercel-forwarded-for")).toBeNull();
-    expect(out.get("connection")).toBeNull();
-    expect(out.get("host")).toBeNull();
-    expect(out.get("accept")).toBe("application/dns-message");
-    expect(out.get("user-agent")).toBe("doh-client");
+    await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+  });
+});
+
+describe("buildUpstreamHeaders (allowlist)", () => {
+  it("only sends Accept, User-Agent and optional Content-Type", () => {
+    const headers = buildUpstreamHeaders("application/dns-message", "vercel-doh/1.0.0", "application/dns-message");
+    expect(headers.get("accept")).toBe("application/dns-message");
+    expect(headers.get("user-agent")).toBe("vercel-doh/1.0.0");
+    expect(headers.get("content-type")).toBe("application/dns-message");
+    // No client-controlled headers are ever propagated.
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("cookie")).toBeNull();
+    expect(headers.get("accept-language")).toBeNull();
+    expect(headers.get("x-forwarded-for")).toBeNull();
+    expect(headers.get("x-custom")).toBeNull();
+    expect([...headers.keys()].sort()).toEqual(["accept", "content-type", "user-agent"]);
   });
 });

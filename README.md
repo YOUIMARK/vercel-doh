@@ -15,19 +15,23 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 
 - **RFC 8484 兼容**: GET `?dns=<base64url>` 与 POST `application/dns-message`
   - 正确状态码: 400 / 405 / 406 / 413 / 415 / 502;成功响应 `Content-Type: application/dns-message`
+  - **协议门**: 查询先过校验(QDCOUNT=1 / 结构完整 / 单 OPT / ECS 合法),不合格直接 400,不触上游
 - **隐私默认值**:
   - 默认只把查询发给 **1 个**上游(轮询),失败才顺序转移,**绝不并发广播**
-  - 默认**不附加 ECS**、默认**不把客户端真实 IP 转发给上游**(转发前剥离 XFF 等头)
-- **健壮**: 单上游 3s 超时,5xx/网络错误自动转移下一个(最多 3 次);全部失败返回
-  合法的 SERVFAIL dns-message(200),标准客户端可正常解析
-- **TTL 感知缓存**: GET + NOERROR 按应答最小 TTL 设置 `s-maxage`(上限可配);
-  POST / 附加了 ECS / 负应答一律 `no-store`
+  - 默认**不附加 ECS**;上游出站头为 **allowlist**(Authorization/Cookie/XFF 等一律不外发)
+  - ECS `/0`(客户端声明不披露地址)被尊重,绝不注入真实子网
+- **健壮**: 单上游 3s 超时;上游仅接受 **2xx + application/dns-message + 结构合法**的响应,
+  否则故障转移(非 2xx body 绝不当作 DNS 应答);`redirect: "error"` 防 SSRF;
+  全部失败返回合法的 SERVFAIL dns-message(200)
+- **TTL 感知缓存**: 正向按 Answer 最小 TTL;NXDOMAIN/NODATA 按 RFC 2308
+  `min(SOA TTL, SOA.MINIMUM)`;SERVFAIL/REFUSED/其它 RCODE 一律 `no-store`;
+  POST / 含 ECS 一律 `no-store`
 - **ECS 支持(默认关)**: `/dns-query/auto_ecs` 强制附加、`/dns-query/no_ecs`
   强制禁用;客户端 IP 取可信头链(`x-vercel-forwarded-for` → `x-real-ip` →
   XFF 最右段),过滤私网/保留地址,**不信任可伪造的最左段**
 - **路径映射(可选)**: `/dns-query/{provider}` 经 `DOMAIN_MAPPINGS` 路由到指定上游
 - **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON)
-- **代理卫生**: HOP_BY_HOP 头过滤、请求体上限 64KB、上游 URL 仅 https 白名单
+- **代理卫生**: 请求体上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)
 
 ## 快速开始
 

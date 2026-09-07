@@ -33,3 +33,41 @@ describe("loadConfig", () => {
     expect(cfg.cacheMaxAge).toBe(300);
   });
 });
+
+describe("strict numeric parsing", () => {
+  it("rejects dirty numeric values instead of truncating", () => {
+    for (const dirty of ["3000foo", "24.9", "12abc", "-5", "0x10", "1e3"]) {
+      expect(() => loadConfig({ CACHE_MAX_AGE: dirty } as NodeJS.ProcessEnv), dirty).toThrow();
+    }
+  });
+
+  it("accepts clean integers within range", () => {
+    expect(loadConfig({ CACHE_MAX_AGE: "120" } as NodeJS.ProcessEnv).cacheMaxAge).toBe(120);
+    expect(loadConfig({ UPSTREAM_TIMEOUT_MS: "2500" } as NodeJS.ProcessEnv).upstreamTimeoutMs).toBe(2500);
+  });
+});
+
+describe("DOMAIN_MAPPINGS validation", () => {
+  it("accepts bare hosts and https URLs", () => {
+    const cfg = loadConfig({
+      DOMAIN_MAPPINGS: JSON.stringify({ google: { targetDomain: "dns.google" } }),
+    } as NodeJS.ProcessEnv);
+    expect(cfg.domainMappings.google!.targetDomain).toBe("dns.google");
+  });
+
+  it("rejects non-https schemes", () => {
+    for (const target of ["http://dns.google", "ftp://x", "file:///etc/passwd"]) {
+      expect(
+        () =>
+          loadConfig({
+            DOMAIN_MAPPINGS: JSON.stringify({ bad: { targetDomain: target } }),
+          } as NodeJS.ProcessEnv),
+        target,
+      ).toThrow();
+    }
+  });
+
+  it("rejects garbage JSON", () => {
+    expect(() => loadConfig({ DOMAIN_MAPPINGS: "not json" } as NodeJS.ProcessEnv)).toThrow();
+  });
+});

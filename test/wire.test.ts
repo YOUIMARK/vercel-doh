@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildErrorResponse,
+  countOptRrs,
   decodeBase64Url,
   encodeBase64Url,
   parseHeader,
@@ -9,7 +10,7 @@ import {
   skipName,
   toView,
 } from "../src/dns/wire";
-import { buildQuestion, buildQuery, buildResponse, dnsName } from "./helpers";
+import { buildOptRr, buildQuestion, buildQuery, buildResponse, concat, dnsName } from "./helpers";
 
 // RFC 8484 §4.1 canonical example query for www.example.com (A).
 const RFC8484_EXAMPLE = "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB";
@@ -84,6 +85,27 @@ describe("buildErrorResponse", () => {
     expect((header!.flags & 0x8000) !== 0).toBe(true); // QR set
     const sections = parseSections(err);
     expect(sections!.questionEnd - 12).toBeGreaterThan(0);
+  });
+
+  it("never produces a header/body QDCOUNT mismatch on malformed queries", () => {
+    // Header claims qd=1 but the question section is truncated.
+    const malformed = new Uint8Array(12);
+    malformed[4] = 0;
+    malformed[5] = 1; // QDCOUNT = 1, no question bytes
+    const err = buildErrorResponse(malformed, 2);
+    const header = parseHeader(err)!;
+    // QDCOUNT must match the actual (absent) question bytes.
+    expect(header.qd).toBe(0);
+    expect(err.length).toBe(12);
+  });
+});
+
+describe("countOptRrs", () => {
+  it("counts OPT RRs in the additional section", () => {
+    expect(countOptRrs(buildQuery())).toBe(0);
+    expect(countOptRrs(buildQuery({ additional: buildOptRr(new Uint8Array(0)) }))).toBe(1);
+    const two = concat([buildOptRr(new Uint8Array(0)), buildOptRr(new Uint8Array(0))]);
+    expect(countOptRrs(buildQuery({ additional: two, ar: 2 }))).toBe(2);
   });
 });
 

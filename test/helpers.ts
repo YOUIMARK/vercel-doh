@@ -2,9 +2,10 @@
 
 import { parseSections, toView } from "../src/dns/wire";
 
-/** Encodes a domain name into DNS label format (no compression). */
+/** Encodes a domain name into DNS label format (no compression). Trailing dot is tolerated. */
 export function dnsName(name: string): Uint8Array<ArrayBuffer> {
-  const parts = name.split(".");
+  const clean = name === "." ? "" : name.replace(/\.$/, "");
+  const parts = clean === "" ? [] : clean.split(".");
   let len = 1; // terminating zero
   for (const p of parts) len += 1 + p.length;
   const out = new Uint8Array(len);
@@ -36,13 +37,15 @@ export interface QueryOptions {
   qd?: number;
   question?: Uint8Array<ArrayBuffer>;
   additional?: Uint8Array<ArrayBuffer>;
+  /** Explicit ARCOUNT override (defaults to 1 when `additional` is present). */
+  ar?: number;
 }
 
 /** Builds a DNS query message. */
 export function buildQuery(opts: QueryOptions = {}): Uint8Array<ArrayBuffer> {
   const question = opts.question ?? buildQuestion("example.com", 1, 1);
   const additional = opts.additional ?? new Uint8Array(0);
-  const ar = opts.additional ? 1 : 0;
+  const ar = opts.ar ?? (opts.additional && opts.additional.length > 0 ? 1 : 0);
   const out = new Uint8Array(12 + question.length + additional.length);
   const view = toView(out);
   view.setUint16(0, opts.id ?? 0x1234);
@@ -83,6 +86,31 @@ export function buildRR(rrType: number, ttl: number, rdata: Uint8Array<ArrayBuff
   return out;
 }
 
+/** Builds a real SOA RDATA (MNAME + RNAME + 5 × uint32). */
+export function buildSoaRdata(
+  mname = "ns1.example.com.",
+  rname = "hostmaster.example.com.",
+  serial = 2024010101,
+  refresh = 7200,
+  retry = 900,
+  expire = 1209600,
+  minimum = 60,
+): Uint8Array<ArrayBuffer> {
+  const m = dnsName(mname);
+  const r = dnsName(rname);
+  const out = new Uint8Array(m.length + r.length + 20);
+  out.set(m, 0);
+  out.set(r, m.length);
+  const view = toView(out);
+  const o = m.length + r.length;
+  view.setUint32(o, serial);
+  view.setUint32(o + 4, refresh);
+  view.setUint32(o + 8, retry);
+  view.setUint32(o + 12, expire);
+  view.setUint32(o + 16, minimum);
+  return out;
+}
+
 export interface ResponseOptions {
   rcode?: number;
   ttl?: number;
@@ -90,6 +118,7 @@ export interface ResponseOptions {
   answerCount?: number;
   answerRdata?: Uint8Array<ArrayBuffer>;
   authorityRdata?: Uint8Array<ArrayBuffer>;
+  soaMinimum?: number;
   /** Additional section bytes (e.g. an OPT RR) appended after authority. */
   additional?: Uint8Array<ArrayBuffer>;
 }
@@ -108,7 +137,9 @@ export function buildResponse(query: Uint8Array<ArrayBuffer>, opts: ResponseOpti
   }
   const ns: Uint8Array<ArrayBuffer>[] = [];
   if (opts.authorityTtl !== undefined) {
-    ns.push(buildRR(6 /* SOA */, opts.authorityTtl, opts.authorityRdata ?? new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])));
+    const soaRdata =
+      opts.authorityRdata ?? buildSoaRdata(undefined, undefined, undefined, undefined, undefined, undefined, opts.soaMinimum ?? 60);
+    ns.push(buildRR(6 /* SOA */, opts.authorityTtl, soaRdata));
   }
   const additional = opts.additional ?? new Uint8Array(0);
 

@@ -4,10 +4,11 @@
 import { setDebugLogging } from "./log";
 
 export interface DomainMapping {
-  /** Hostname (with or without scheme) that a path prefix maps to. */
+  /**
+   * Upstream base for the provider. A bare hostname is normalized to https;
+   * an explicit scheme must be https: (validated at parse time — SSRF guard).
+   */
   targetDomain: string;
-  /** Optional path rewrite rules, e.g. { "/query-dns": "/dns-query" }. */
-  pathMapping?: Record<string, string>;
 }
 
 export interface DoHConfig {
@@ -69,8 +70,12 @@ export function parseBool(value: string | undefined, fallback: boolean): boolean
 
 function parseNumber(value: string | undefined, fallback: number, min: number, max: number, name: string): number {
   if (value === undefined || value === "") return fallback;
+  // Strict integer only — "3000foo" / "24.9" must be rejected, not truncated.
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`invalid ${name}: "${value}" (expected an integer ${min}..${max})`);
+  }
   const n = Number.parseInt(value, 10);
-  if (Number.isNaN(n) || n < min || n > max) {
+  if (Number.isNaN(n) || !Number.isFinite(n) || n < min || n > max) {
     throw new Error(`invalid ${name}: "${value}" (expected ${min}..${max})`);
   }
   return n;
@@ -115,17 +120,18 @@ function parseDomainMappings(value: string | undefined): Record<string, DomainMa
     if (typeof m.targetDomain !== "string" || m.targetDomain.length === 0) {
       throw new Error(`DOMAIN_MAPPINGS["${prefix}"].targetDomain must be a non-empty string`);
     }
-    const pathMapping: Record<string, string> = {};
-    if (m.pathMapping !== undefined) {
-      if (typeof m.pathMapping !== "object" || Array.isArray(m.pathMapping)) {
-        throw new Error(`DOMAIN_MAPPINGS["${prefix}"].pathMapping must be an object`);
-      }
-      for (const [src, dest] of Object.entries(m.pathMapping as Record<string, unknown>)) {
-        if (typeof dest !== "string") throw new Error(`DOMAIN_MAPPINGS pathMapping values must be strings`);
-        pathMapping[src] = dest;
-      }
+    // Same https-only rule as the regular upstreams (SSRF guard).
+    const raw = m.targetDomain.includes("://") ? m.targetDomain : `https://${m.targetDomain}`;
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error(`DOMAIN_MAPPINGS["${prefix}"].targetDomain is not a valid URL`);
     }
-    out[prefix] = { targetDomain: m.targetDomain, pathMapping };
+    if (url.protocol !== "https:") {
+      throw new Error(`DOMAIN_MAPPINGS["${prefix}"].targetDomain must be https`);
+    }
+    out[prefix] = { targetDomain: m.targetDomain };
   }
   return out;
 }
