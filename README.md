@@ -33,7 +33,9 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 - **URL flags(按请求覆盖环境变量)**: 在端点路径后追加
   `/v4`(仅 IPv4)/`/v6`(仅 IPv6)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS),
   可组合且顺序任意,如 `/dns-query/v4/ecs`、`/dns-query/v6/google`;URL 优先于环境变量
-- **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON)
+- **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
+  同样支持 flag 后缀,如 `/dns-query-json/v4/ecs`(v4 = 仅 IPv4 连接上游,
+  ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数)
 - **代理卫生**: 请求体上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)
 
 ## 快速开始

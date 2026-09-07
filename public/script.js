@@ -8,22 +8,42 @@ const domainInput = document.getElementById("domain");
 const typeInput = document.getElementById("type");
 const doCheckbox = document.getElementById("opt-do");
 const cdCheckbox = document.getElementById("opt-cd");
+const familySelect = document.getElementById("opt-family");
+const ecsSelect = document.getElementById("opt-ecs");
 const submitButton = document.getElementById("submit-button");
 const buttonText = document.getElementById("button-text");
 const spinner = document.getElementById("spinner");
 const results = document.getElementById("results");
 const endpointCode = document.getElementById("endpoint-code");
 const copyButton = document.getElementById("copy-endpoint");
+const epFamily = document.getElementById("ep-family");
+const epEcs = document.getElementById("ep-ecs");
 
-// ── DoH endpoint display ────────────────────────────────────────────────
+// ── DoH endpoint display (client-config builder) ────────────────────────
 // The server injects the configured base path via window.DOH_ENDPOINT
 // (path obfuscation); default to /dns-query when absent.
-const endpoint = `${location.origin}${window.DOH_ENDPOINT || "/dns-query"}`;
-if (endpointCode) endpointCode.textContent = endpoint;
+const dohPath = window.DOH_ENDPOINT || "/dns-query";
+
+/** Joins selected URL flags: "v4", "ecs", "v4/ecs", … ("" when none). */
+function flagPath(familySel, ecsSel) {
+  return [familySel.value, ecsSel.value].filter(Boolean).join("/");
+}
+
+function renderEndpoint() {
+  const flags = flagPath(epFamily, epEcs);
+  const endpoint = `${location.origin}${dohPath}${flags ? "/" + flags : ""}`;
+  if (endpointCode) endpointCode.textContent = endpoint;
+  return endpoint;
+}
+
+let currentEndpoint = renderEndpoint();
+if (epFamily) epFamily.addEventListener("change", () => (currentEndpoint = renderEndpoint()));
+if (epEcs) epEcs.addEventListener("change", () => (currentEndpoint = renderEndpoint()));
+
 if (copyButton) {
   copyButton.addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(endpoint);
+      await navigator.clipboard.writeText(currentEndpoint);
       copyButton.textContent = "已复制 ✓";
       setTimeout(() => (copyButton.textContent = "复制"), 1500);
     } catch {
@@ -164,6 +184,9 @@ form.addEventListener("submit", async (event) => {
   const params = new URLSearchParams({ name, type });
   if (doCheckbox.checked) params.set("do", "1");
   if (cdCheckbox.checked) params.set("cd", "1");
+  // Apply the selected URL flags to this query (v4/v6/ecs/no-ecs).
+  const flags = flagPath(familySelect, ecsSelect);
+  const jsonPath = `/dns-query-json${flags ? "/" + flags : ""}`;
 
   results.replaceChildren(el("p", "placeholder", "查询中…"));
   submitButton.disabled = true;
@@ -172,7 +195,7 @@ form.addEventListener("submit", async (event) => {
   const startedAt = performance.now();
 
   try {
-    const res = await fetch(`/dns-query-json?${params}`, {
+    const res = await fetch(`${jsonPath}?${params}`, {
       headers: { Accept: "application/dns-json" },
     });
     if (!res.ok) {

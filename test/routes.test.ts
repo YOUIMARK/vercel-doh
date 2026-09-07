@@ -287,6 +287,64 @@ describe("CORS / aux endpoints", () => {
   });
 });
 
+describe("dns-json URL flags", () => {
+  const jsonResponse = () =>
+    new Response(JSON.stringify({ Status: 0 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("/v4 applies the IPv4 dispatcher to the JSON upstream", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp().request("/dns-query-json/v4?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    const init = vi.mocked(fetch).mock.calls[0]![1] as RequestInit & { dispatcher?: unknown };
+    expect(init.dispatcher).toBe(getDispatcher("v4"));
+  });
+
+  it("/ecs injects a masked edns_client_subnet from the client IP (no-store)", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp().request("/dns-query-json/ecs?name=example.com&type=A", {
+      headers: { accept: "application/dns-json", "x-vercel-forwarded-for": "8.8.8.8" },
+    });
+    expect(res.status).toBe(200);
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.get("edns_client_subnet")).toBe("8.8.8.0/24");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("/no-ecs strips a client-provided edns_client_subnet (privacy, cacheable)", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp().request(
+      "/dns-query-json/no-ecs?name=example.com&type=A&edns_client_subnet=1.2.3.0/24",
+      { headers: { accept: "application/dns-json" } },
+    );
+    expect(res.status).toBe(200);
+    const calledUrl = new URL(String(vi.mocked(fetch).mock.calls[0]![0]));
+    expect(calledUrl.searchParams.has("edns_client_subnet")).toBe(false);
+    expect(res.headers.get("cache-control")).toContain("s-maxage=300");
+  });
+
+  it("applies UPSTREAM_FAMILY env to JSON queries by default", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse());
+    const res = await makeApp({ UPSTREAM_FAMILY: "v6" }).request("/dns-query-json?name=example.com&type=A", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(200);
+    const init = vi.mocked(fetch).mock.calls[0]![1] as RequestInit & { dispatcher?: unknown };
+    expect(init.dispatcher).toBe(getDispatcher("v6"));
+  });
+
+  it("rejects unknown JSON flag suffixes with 404", async () => {
+    const res = await makeApp().request("/dns-query-json/foo?name=example.com", {
+      headers: { accept: "application/dns-json" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("ECS /auto_ecs", () => {
   it("injects ECS into a query without an OPT RR (single OPT, no-store)", async () => {
     const app = makeApp();

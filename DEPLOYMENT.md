@@ -121,6 +121,9 @@ https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 > ⚠️ 用**路径后缀**而非 query 参数: DoH GET 客户端会自己拼接 `?dns=...`,
 > query 里的 flag 会被拼坏(如 `?v4&ecs?dns=…`)。路径后缀与 RFC 8484 完全兼容。
 
+网页工具的 JSON API 同样支持 flag 后缀(作用于上游连接与子网注入):
+`/dns-query-json/v4/ecs`、`/dns-query-json/no-ecs` 等。
+
 行为细节:
 - `DOH_PATH` 必须是**单个路径段**(`/xxx` 格式,字母/数字/`-`/`_`),非法值会在启动时报错
 - 设置后标准 `/dns-query`、`/dns-query/auto_ecs` 等**不再注册**,返回 404

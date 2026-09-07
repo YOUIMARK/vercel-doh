@@ -46,6 +46,20 @@ export function homePage(config: DoHConfig) {
         </datalist>
       </div>
       <div class="options">
+        <label>地址族
+          <select id="opt-family">
+            <option value="">自动</option>
+            <option value="v4">仅 IPv4</option>
+            <option value="v6">仅 IPv6</option>
+          </select>
+        </label>
+        <label>ECS
+          <select id="opt-ecs">
+            <option value="">默认</option>
+            <option value="ecs">开启</option>
+            <option value="no-ecs">关闭</option>
+          </select>
+        </label>
         <label><input type="checkbox" id="opt-do"> DNSSEC OK (DO)</label>
         <label><input type="checkbox" id="opt-cd"> 禁用 DNSSEC 校验 (CD)</label>
       </div>
@@ -63,8 +77,24 @@ export function homePage(config: DoHConfig) {
       <code class="endpoint" id="endpoint-code">…</code>
       <button type="button" class="copy-btn" id="copy-endpoint">复制</button>
     </div>
+    <div class="options" style="margin-top:0.7rem">
+      <label>地址族
+        <select id="ep-family">
+          <option value="">自动</option>
+          <option value="v4">仅 IPv4</option>
+          <option value="v6">仅 IPv6</option>
+        </select>
+      </label>
+      <label>ECS
+        <select id="ep-ecs">
+          <option value="">默认</option>
+          <option value="ecs">开启</option>
+          <option value="no-ecs">关闭</option>
+        </select>
+      </label>
+    </div>
     <p class="hint">浏览器安全 DNS / AdGuard / dnscrypt-proxy / stubby / <code>dig +https</code> 均可使用。<br>
-    端点路径: <code>${dohEndpoint}</code> · 查询仅转发给 1 个上游,默认不附加 ECS,保护隐私。</p>
+    端点路径: <code>${dohEndpoint}</code> · 上方下拉会拼出带 flag 的端点(如 <code>${dohEndpoint}/v4/ecs</code>),URL 优先于环境变量;上方查询表单的「地址族/ECS」下拉作用于本次查询。</p>
   </section>
 
   <section class="card">
