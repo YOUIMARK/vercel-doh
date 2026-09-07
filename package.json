@@ -15,7 +15,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "undici": "^7.0.0"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.0",

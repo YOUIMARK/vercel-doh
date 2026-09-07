@@ -30,6 +30,9 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   强制禁用;客户端 IP 取可信头链(`x-vercel-forwarded-for` → `x-real-ip` →
   XFF 最右段),过滤私网/保留地址,**不信任可伪造的最左段**
 - **路径映射(可选)**: `/dns-query/{provider}` 经 `DOMAIN_MAPPINGS` 路由到指定上游
+- **URL flags(按请求覆盖环境变量)**: 在端点路径后追加
+  `/v4`(仅 IPv4)/`/v6`(仅 IPv6)/`/ecs`(强制 ECS)/`/no-ecs`(强制禁 ECS),
+  可组合且顺序任意,如 `/dns-query/v4/ecs`、`/dns-query/v6/google`;URL 优先于环境变量
 - **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON)
 - **代理卫生**: 请求体上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)
 
@@ -72,6 +75,7 @@ curl -X POST --data-binary @query.bin \
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 常规上游,逗号分隔(顺序转移) |
+| `UPSTREAM_FAMILY` | `auto` | 上游连接地址族: `auto`(默认)/ `v4`(仅 IPv4)/ `v6`(仅 IPv6);可用 URL flag 覆盖 |
 | `DOH_PATH` | `/dns-query` | DoH 端点路径。改成随机路径(如 `/3f9a2b7c`)即路径混淆,标准路径自动 404 |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 请求带 ECS 时使用的上游 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | dns-json 上游 |

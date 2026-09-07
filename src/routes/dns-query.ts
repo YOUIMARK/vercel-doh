@@ -1,7 +1,7 @@
 // The core RFC 8484 DoH handler (GET + POST).
 
 import type { Context } from "hono";
-import type { DoHConfig } from "../config";
+import type { DoHConfig, Family } from "../config";
 import { buildCacheControl } from "../cache-control";
 import { corsHeaders, servfailResponse, textError } from "../errors";
 import { debugLog } from "../log";
@@ -16,15 +16,45 @@ export const DNS_MESSAGE = "application/dns-message";
 
 export type EcsBehavior = "default" | "force_enable" | "force_disable";
 
-/** Extracts the optional provider segment from paths like {base}/{provider}. */
-export function providerFromPath(pathname: string, basePath: string): string | null {
+const INVALID_PATH = "__invalid__";
+
+/**
+ * URL flags parsed from path suffixes after the base path, e.g.
+ *   {base}/v4          → IPv4-only upstream connection
+ *   {base}/v6          → IPv6-only upstream connection
+ *   {base}/ecs         → force ECS on (alias: /auto_ecs)
+ *   {base}/no-ecs      → force ECS off (alias: /no_ecs)
+ *   {base}/{provider}  → provider routing
+ * Flags are combinable in any order: {base}/v4/ecs, {base}/ecs/v6/...
+ * URL flags override environment defaults per request.
+ */
+export interface PathFlags {
+  family: Family | null;
+  behavior: EcsBehavior | null;
+  provider: string | null;
+}
+
+const ECS_FLAGS = new Map<string, EcsBehavior>([
+  ["ecs", "force_enable"],
+  ["auto_ecs", "force_enable"],
+  ["no-ecs", "force_disable"],
+  ["no_ecs", "force_disable"],
+]);
+
+export function parsePathFlags(pathname: string, basePath: string): PathFlags {
   const base = basePath.replace(/\/+$/, "");
-  if (pathname === base) return null;
-  if (!pathname.startsWith(`${base}/`)) return null;
-  const rest = pathname.slice(base.length + 1);
-  const provider = rest.split("/")[0];
-  if (!provider || provider === "auto_ecs" || provider === "no_ecs") return null;
-  return provider;
+  if (pathname === base) return { family: null, behavior: null, provider: null };
+  if (!pathname.startsWith(`${base}/`)) return { family: null, behavior: null, provider: null };
+  const segments = pathname.slice(base.length + 1).split("/").filter((s) => s.length > 0);
+  const flags: PathFlags = { family: null, behavior: null, provider: null };
+  for (const segment of segments) {
+    if (segment === "v4") flags.family = "v4";
+    else if (segment === "v6") flags.family = "v6";
+    else if (ECS_FLAGS.has(segment)) flags.behavior = ECS_FLAGS.get(segment)!;
+    else if (flags.provider === null) flags.provider = segment;
+    else flags.provider = INVALID_PATH; // more than one unknown segment
+  }
+  return flags;
 }
 
 export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
@@ -97,9 +127,18 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     // ── ECS handling (privacy: only when explicitly enabled) ──
     // ECS with source prefix 0 is a client's explicit "do not disclose my
     // address" signal — never inject the real subnet over it.
+    const flags = parsePathFlags(c.req.path, config.dohPath);
+    if (flags.provider === INVALID_PATH) {
+      return textError(404, "Unknown path", corsHeaders());
+    }
+    // URL flags override the route's registered behavior and env defaults.
+    const effectiveBehavior = flags.behavior ?? behavior;
+    const family = flags.family ?? config.upstreamFamily;
+
     const incomingEcs = ecs !== "absent";
     const shouldAddEcs =
-      behavior === "force_enable" || (behavior === "default" && config.autoAddEcs);
+      effectiveBehavior === "force_enable" ||
+      (effectiveBehavior === "default" && config.autoAddEcs);
     let ecsAdded = false;
     if (shouldAddEcs && ecs === "absent") {
       const clientIp = parseClientIp(c.req.raw.headers);
@@ -120,7 +159,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       ecsSensitive && config.ecsUpstreamUrls.length > 0
         ? config.ecsUpstreamUrls
         : config.upstreamUrls;
-    const provider = providerFromPath(c.req.path, config.dohPath);
+    const provider = flags.provider;
     if (provider) {
       const mapped = resolveProvider(config, provider);
       if (!mapped) return textError(404, `Unknown provider: ${provider}`, corsHeaders());
@@ -143,7 +182,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
         const target = new URL(url);
         target.searchParams.set("dns", encoded);
         return { url: target.href, init: { method: "GET", headers: upstreamHeaders, signal } };
-      });
+      }, family);
 
       const upstreamBody = result.body;
       const resHeader = parseHeader(upstreamBody)!; // validated in upstream layer
@@ -194,8 +233,9 @@ function infoText(config: DoHConfig): Response {
   POST ${base}                          (Content-Type: application/dns-message)</pre>
 <ul>
 <li><code>${base}</code> — 标准端点(默认不附加 ECS)</li>
-<li><code>${base}/auto_ecs</code> — 强制为请求附加 EDNS Client Subnet</li>
-<li><code>${base}/no_ecs</code> — 强制禁用 ECS</li>
+<li><code>${base}/v4</code> — 仅用 IPv4 连接上游; <code>${base}/v6</code> — 仅用 IPv6</li>
+<li><code>${base}/ecs</code> — 强制附加 EDNS Client Subnet; <code>${base}/no-ecs</code> — 强制禁用</li>
+<li><code>${base}/{provider}</code> — 按 <code>DOMAIN_MAPPINGS</code> 路由指定上游(可与上面的 flag 组合,如 <code>${base}/v4/ecs</code>)</li>
 <li><code>/dns-query-json</code> — dns-json API(浏览器查询工具)</li>
 <li><code>/health</code> — 健康检查</li>
 </ul>

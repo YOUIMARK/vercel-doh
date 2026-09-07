@@ -6,7 +6,7 @@ import type { Context } from "hono";
 import type { DoHConfig } from "../config";
 import { corsHeaders, textError } from "../errors";
 import { debugLog } from "../log";
-import { UpstreamError } from "../upstream";
+import { getDispatcher, UpstreamError } from "../upstream";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
@@ -63,6 +63,7 @@ async function fetchJsonWithFailover(
   headers: Headers,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const attempts = Math.min(config.maxAttempts, upstreams.length);
+  const dispatcher = getDispatcher(config.upstreamFamily);
   let lastError: Error | null = null;
   for (let i = 0; i < attempts; i++) {
     const upstream = upstreams[i] as string;
@@ -76,6 +77,9 @@ async function fetchJsonWithFailover(
         headers,
         signal: controller.signal,
         redirect: "error", // SSRF: never follow redirects
+        // undici Agent vs Node's bundled undici-types: same object, distinct
+        // type worlds — the runtime contract is identical, so cast explicitly.
+        ...(dispatcher ? { dispatcher: dispatcher as unknown as never } : {}),
       });
       if (!res.ok) throw new UpstreamError(`upstream ${target.href} -> ${res.status}`);
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();

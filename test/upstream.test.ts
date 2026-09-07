@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config";
 import {
   buildUpstreamHeaders,
+  getDispatcher,
   pickUpstream,
   queryUpstreams,
   resetCursor,
@@ -177,6 +178,29 @@ describe("redirect hardening", () => {
       return validResponse();
     });
     await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }));
+  });
+});
+
+describe("address-family dispatchers", () => {
+  it("selects a dispatcher for v4/v6 and none for auto", () => {
+    expect(getDispatcher("auto")).toBeUndefined();
+    expect(getDispatcher("v4")).toBeDefined();
+    expect(getDispatcher("v6")).toBeDefined();
+  });
+
+  it("passes the family dispatcher into the upstream fetch", async () => {
+    const cfg = config();
+    const fetchMock = vi.mocked(fetch);
+    // A fresh Response per call — a shared Response's body can only be read once.
+    fetchMock.mockImplementation(async () => validResponse());
+
+    await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), "v4");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit & { dispatcher?: unknown };
+    expect(init.dispatcher).toBeDefined();
+
+    await queryUpstreams(cfg, cfg.upstreamUrls, (url, signal) => ({ url, init: { signal } }), "auto");
+    const autoInit = fetchMock.mock.calls[1]![1] as RequestInit & { dispatcher?: unknown };
+    expect(autoInit.dispatcher).toBeUndefined();
   });
 });
 

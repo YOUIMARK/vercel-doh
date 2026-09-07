@@ -11,6 +11,9 @@ export interface DomainMapping {
   targetDomain: string;
 }
 
+/** Upstream connection address family preference. */
+export type Family = "auto" | "v4" | "v6";
+
 export interface DoHConfig {
   /** Regular dns-message upstreams, tried in order (no broadcast by default). */
   upstreamUrls: string[];
@@ -20,6 +23,8 @@ export interface DoHConfig {
   jsonUpstreamUrls: string[];
   /** Base path for the DoH endpoints (path obfuscation). Default: /dns-query. */
   dohPath: string;
+  /** Upstream connection address family: auto | v4 (IPv4 only) | v6 (IPv6 only). */
+  upstreamFamily: Family;
   /** Globally auto-attach ECS to queries without one (privacy: default off). */
   autoAddEcs: boolean;
   ipv4EcsPrefixLength: number;
@@ -47,6 +52,7 @@ export const DEFAULTS = {
   ECS_UPSTREAM_DOH_URLS: "https://dns.google/dns-query",
   JSON_UPSTREAM_DOH_URLS: "https://dns.google/resolve",
   DOH_PATH: "/dns-query",
+  UPSTREAM_FAMILY: "auto",
   AUTO_ADD_ECS: false,
   IPV4_ECS_PREFIX_LENGTH: 24,
   IPV6_ECS_PREFIX_LENGTH: 56,
@@ -149,12 +155,20 @@ export function parseDohPath(value: string | undefined): string {
   return raw;
 }
 
+export function parseFamily(value: string | undefined): Family {
+  if (value === undefined || value === "") return "auto";
+  const v = value.trim().toLowerCase();
+  if (v === "auto" || v === "v4" || v === "v6") return v;
+  throw new Error(`invalid UPSTREAM_FAMILY: "${value}" (expected auto | v4 | v6)`);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
   const config: DoHConfig = {
     upstreamUrls: parseUrlList(env.UPSTREAM_DOH_URLS, DEFAULTS.UPSTREAM_DOH_URLS),
     ecsUpstreamUrls: parseUrlList(env.ECS_UPSTREAM_DOH_URLS, DEFAULTS.ECS_UPSTREAM_DOH_URLS),
     jsonUpstreamUrls: parseUrlList(env.JSON_UPSTREAM_DOH_URLS, DEFAULTS.JSON_UPSTREAM_DOH_URLS),
     dohPath: parseDohPath(env.DOH_PATH),
+    upstreamFamily: parseFamily(env.UPSTREAM_FAMILY),
     autoAddEcs: parseBool(env.AUTO_ADD_ECS, DEFAULTS.AUTO_ADD_ECS),
     ipv4EcsPrefixLength: parseNumber(env.IPV4_ECS_PREFIX_LENGTH, DEFAULTS.IPV4_ECS_PREFIX_LENGTH, 0, 32, "IPV4_ECS_PREFIX_LENGTH"),
     ipv6EcsPrefixLength: parseNumber(env.IPV6_ECS_PREFIX_LENGTH, DEFAULTS.IPV6_ECS_PREFIX_LENGTH, 0, 128, "IPV6_ECS_PREFIX_LENGTH"),

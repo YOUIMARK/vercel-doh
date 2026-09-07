@@ -35,6 +35,7 @@ vercel deploy --prod
 | 变量 | 默认值 | 建议 |
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 想多上游容错就逗号分隔,如 `https://cloudflare-dns.com/dns-query,https://dns.google/dns-query` |
+| `UPSTREAM_FAMILY` | `auto` | 上游连接地址族: `auto` / `v4`(仅 IPv4)/ `v6`(仅 IPv6);被 URL flag 覆盖 |
 | `DOH_PATH` | `/dns-query` | **路径混淆**: 改成随机路径段后,DoH 端点挂到新路径,标准 `/dns-query` 自动 404 |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 带 ECS 的请求走这里 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | 网页工具的 dns-json 上游 |
@@ -104,6 +105,21 @@ DOH_PATH = /3f9a2b7c8d1e4f5a
 https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a            # GET ?dns=…
 https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/auto_ecs   # 强制 ECS
 ```
+
+**URL flags(按请求覆盖环境变量,URL 优先)**: 在端点路径后追加一个或多个 flag,
+顺序任意、可组合:
+```text
+/v4        仅用 IPv4 连接上游(覆盖 UPSTREAM_FAMILY)
+/v6        仅用 IPv6 连接上游
+/ecs       强制附加 ECS(= /auto_ecs)
+/no-ecs    强制禁用 ECS(= /no_ecs)
+
+例: https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/v4/ecs
+    https://<你的项目>.vercel.app/3f9a2b7c8d1e4f5a/v6/google   (v6 + provider)
+```
+
+> ⚠️ 用**路径后缀**而非 query 参数: DoH GET 客户端会自己拼接 `?dns=...`,
+> query 里的 flag 会被拼坏(如 `?v4&ecs?dns=…`)。路径后缀与 RFC 8484 完全兼容。
 
 行为细节:
 - `DOH_PATH` 必须是**单个路径段**(`/xxx` 格式,字母/数字/`-`/`_`),非法值会在启动时报错

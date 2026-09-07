@@ -47,6 +47,24 @@ describe("strict numeric parsing", () => {
   });
 });
 
+describe("UPSTREAM_FAMILY", () => {
+  it("defaults to auto", () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).upstreamFamily).toBe("auto");
+  });
+
+  it("accepts v4 / v6 / auto", () => {
+    expect(loadConfig({ UPSTREAM_FAMILY: "v4" } as NodeJS.ProcessEnv).upstreamFamily).toBe("v4");
+    expect(loadConfig({ UPSTREAM_FAMILY: "V6" } as NodeJS.ProcessEnv).upstreamFamily).toBe("v6");
+    expect(loadConfig({ UPSTREAM_FAMILY: "auto" } as NodeJS.ProcessEnv).upstreamFamily).toBe("auto");
+  });
+
+  it("rejects invalid values", () => {
+    for (const bad of ["v5", "ipv4", "dual", "4"]) {
+      expect(() => loadConfig({ UPSTREAM_FAMILY: bad } as NodeJS.ProcessEnv), bad).toThrow();
+    }
+  });
+});
+
 describe("DOMAIN_MAPPINGS validation", () => {
   it("accepts bare hosts and https URLs", () => {
     const cfg = loadConfig({

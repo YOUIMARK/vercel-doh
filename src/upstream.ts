@@ -11,9 +11,11 @@
 // status codes, Content-Type, DNS validation and body reading — is resolved
 // INSIDE this layer. The caller only ever receives a validated DNS payload.
 
-import type { DoHConfig } from "./config";
+import type { DoHConfig, Family } from "./config";
 import { validateDnsResponse } from "./dns/validate";
 import { debugLog } from "./log";
+import { Agent } from "undici";
+import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 
 export class UpstreamError extends Error {}
 
@@ -31,6 +33,30 @@ export interface UpstreamRequest {
 
 /** Round-robin cursor (per instance; serverless instances share nothing, which is fine). */
 let cursor = 0;
+
+// ── Address-family dispatchers (v4-only / v6-only upstream connections) ──
+// A custom undici Agent with a family-filtered lookup replaces Node's default
+// resolver for those requests. "auto" keeps the default (both families).
+
+function familyLookup(family: 4 | 6) {
+  return (
+    hostname: string,
+    options: { family?: number | "IPv4" | "IPv6"; hints?: number; all?: boolean; verbatim?: boolean },
+    callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+  ) => {
+    dnsLookup(hostname, { ...options, family }, (err, address, fam) => callback(err, address, fam));
+  };
+}
+
+const v4Agent = new Agent({ connect: { lookup: familyLookup(4) } });
+const v6Agent = new Agent({ connect: { lookup: familyLookup(6) } });
+
+/** Returns the undici dispatcher for a family preference, or undefined for auto. */
+export function getDispatcher(family: Family): Agent | undefined {
+  if (family === "v4") return v4Agent;
+  if (family === "v6") return v6Agent;
+  return undefined;
+}
 
 /** Resolves a path-mapped provider to an upstream URL, or null. */
 export function resolveProvider(config: DoHConfig, provider: string): string | null {
@@ -69,12 +95,13 @@ export async function queryUpstreams(
   config: DoHConfig,
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
+  family: Family = "auto",
 ): Promise<UpstreamDnsResult> {
   if (urls.length === 0) throw new UpstreamError("no upstream configured");
   if (config.raceUpstreams && urls.length > 1) {
-    return raceUpstreams(urls, buildRequest, config.upstreamTimeoutMs);
+    return raceUpstreams(urls, buildRequest, config.upstreamTimeoutMs, family);
   }
-  return sequentialFailover(config, urls, buildRequest);
+  return sequentialFailover(config, urls, buildRequest, family);
 }
 
 /**
@@ -87,9 +114,17 @@ async function fetchValidated(
   url: string,
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   signal: AbortSignal,
+  family: Family,
 ): Promise<UpstreamDnsResult> {
   const { url: fetchUrl, init } = buildRequest(url, signal);
-  const res = await fetch(fetchUrl, { ...init, redirect: "error" }); // SSRF: never follow redirects
+  const dispatcher = getDispatcher(family);
+  const res = await fetch(fetchUrl, {
+    ...init,
+    redirect: "error", // SSRF: never follow redirects
+    // undici Agent vs Node's bundled undici-types: same object, distinct type
+    // worlds — the runtime contract is identical, so cast explicitly.
+    ...(dispatcher ? { dispatcher: dispatcher as unknown as never } : {}),
+  });
   if (!res.ok) throw new UpstreamError(`upstream ${fetchUrl} -> ${res.status}`);
   const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
   if (!contentType.includes("application/dns-message")) {
@@ -106,6 +141,7 @@ async function sequentialFailover(
   config: DoHConfig,
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
+  family: Family,
 ): Promise<UpstreamDnsResult> {
   const attempts = Math.min(config.maxAttempts, urls.length);
   const start = cursor % urls.length;
@@ -116,7 +152,7 @@ async function sequentialFailover(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
     try {
-      const result = await fetchValidated(url, buildRequest, controller.signal);
+      const result = await fetchValidated(url, buildRequest, controller.signal, family);
       debugLog(`upstream ${url} -> ${result.status}`);
       return result;
     } catch (err) {
@@ -132,6 +168,7 @@ async function raceUpstreams(
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   timeoutMs: number,
+  family: Family,
 ): Promise<UpstreamDnsResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -139,7 +176,7 @@ async function raceUpstreams(
     // Body is read (and validated) inside each attempt, so aborting the losers
     // after the winner resolves can never abort an unread winner body.
     const attempts = urls.map(async (url) => {
-      const result = await fetchValidated(url, buildRequest, controller.signal);
+      const result = await fetchValidated(url, buildRequest, controller.signal, family);
       debugLog(`race: ${url} -> ${result.status}`);
       return result;
     });
