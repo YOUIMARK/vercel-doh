@@ -10,6 +10,13 @@
 // invocations, so anything client-specific (ECS) or transiently wrong
 // (SERVFAIL) must never be cached publicly. Negative responses without a
 // usable SOA MINIMUM cannot be given a safe TTL, so they are not cached.
+//
+// Deliberately NO `stale-while-revalidate`: a DNS record's TTL is a HARD
+// expiry (RFC 1035 §3.2.1: "the time interval that the resource record may
+// be cached before it should be discarded"). Serving stale DNS past the TTL
+// would hand clients answers older than the record's own lifetime — the CDN
+// must refetch once s-maxage elapses, never extend it with a serve-stale
+// window.
 
 export interface CacheControlInput {
   method: string;
@@ -43,9 +50,5 @@ export function buildCacheControl(input: CacheControlInput): string {
   if (ttl === null) return "no-store";
 
   const capped = Math.max(0, Math.min(ttl, input.cacheMaxAge));
-  // The serve-stale window never exceeds the entry's own TTL (bounded at 60s):
-  // the CDN may revalidate in the background, but stale data is never served
-  // for longer than the answer would have been considered fresh anyway.
-  const stale = Math.max(0, Math.min(60, capped));
-  return `public, s-maxage=${capped}, stale-while-revalidate=${stale}`;
+  return `public, s-maxage=${capped}`;
 }

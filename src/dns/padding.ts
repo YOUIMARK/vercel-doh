@@ -13,7 +13,7 @@
 // does NOT recommend) keeping each message on a block boundary so the
 // original length cannot be inferred from the observed length distribution.
 
-import { parseSections, toView } from "./wire.js";
+import { MAX_DNS_MESSAGE_BYTES, parseSections, toView } from "./wire.js";
 
 export const PADDING_OPTION_CODE = 12;
 /** Base block size; every chosen block is a multiple of this (keeps idempotency). */
@@ -49,6 +49,10 @@ export function padResponse(
   const overhead = opt ? 4 : 15; // 4 = option header; 15 = OPT RR header (11) + option header (4)
   // Solve (msg.length + overhead + padLen) ≡ 0 (mod block).
   const padLen = (block - ((msg.length + overhead) % block)) % block;
+  // RFC 8484 / RFC 1035: a DNS message can never exceed 65535 bytes. If
+  // padding would push the response past the wire maximum, skip padding —
+  // an over-limit message is worse than an unpadded one.
+  if (msg.length + overhead + padLen > MAX_DNS_MESSAGE_BYTES) return msg;
 
   const option = new Uint8Array(4 + padLen);
   const view = toView(option);

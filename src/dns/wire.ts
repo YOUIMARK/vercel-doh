@@ -1,5 +1,15 @@
 // Low-level DNS wire-format helpers (pure functions over Uint8Array).
 
+/** Absolute maximum size of a DNS message (RFC 1035 §4.2.1 / RFC 8484: the
+ *  2-byte length field caps messages at 65535 bytes — 65536 is NOT legal). */
+export const MAX_DNS_MESSAGE_BYTES = 65535;
+
+/** Maximum length of an expanded domain name in octets (RFC 1035 §2.3.4). */
+export const MAX_DNS_NAME_OCTETS = 255;
+
+/** Maximum compression-pointer hops we follow per name (loop/hop guard). */
+const MAX_POINTER_HOPS = 128;
+
 export interface DnsHeader {
   id: number;
   flags: number;
@@ -34,27 +44,48 @@ export function rcodeOf(flags: number): number {
 /**
  * Skips a (possibly compressed) domain name. Returns the offset after the name, or -1 if malformed.
  *
- * Compression pointers (RFC 1035 §4.1.4) are consumed but never dereferenced
- * (callers only need the name boundary). The pointer TARGET is still
- * validated: it must point to a prior occurrence inside the message and never
- * into the 12-byte header — a dangling or forward pointer is malformed input,
- * not a valid name.
+ * Compression pointers (RFC 1035 §4.1.4) are followed and their target is
+ * dereferenced: the target must be a prior occurrence inside the message,
+ * never into the 12-byte header, and must itself sit on a valid name
+ * (a label-length byte ≤ 63, another pointer, or the root terminator) —
+ * a pointer into the middle of a label or into an RR fixed field is
+ * malformed input, not a valid name. Chains are bounded by a hop cap.
+ * The EXPANDED name length is tracked and capped at 255 octets
+ * (RFC 1035 §2.3.4): labels may not be summed past the limit even when the
+ * wire encoding itself is short.
  */
 export function skipName(view: DataView, offset: number): number {
+  return skipNameInner(view, offset, 0, 0);
+}
+
+/** Walks one name, accumulating the expanded length; returns end offset or -1. */
+function skipNameInner(view: DataView, offset: number, expanded: number, hops: number): number {
   let o = offset;
+  let len = expanded;
   while (o < view.byteLength) {
-    const len = view.getUint8(o);
-    if (len === 0) return o + 1;
-    if ((len & 0xc0) === 0xc0) {
+    const b = view.getUint8(o);
+    if (b === 0) {
+      len += 1; // root terminator counts toward the 255-octet limit
+      return len > MAX_DNS_NAME_OCTETS ? -1 : o + 1;
+    }
+    if ((b & 0xc0) === 0xc0) {
       // Compression pointer: consumes 2 bytes and ends the name.
       if (o + 2 > view.byteLength) return -1;
-      const target = ((len & 0x3f) << 8) | view.getUint8(o + 1);
+      const target = ((b & 0x3f) << 8) | view.getUint8(o + 1);
       if (target < 12 || target >= o) return -1; // must point back into the message, never into the header
+      if (hops >= MAX_POINTER_HOPS) return -1; // pointer chain too deep
+      // Dereference the target: it must sit on a valid name start (a label
+      // length ≤ 63, another pointer, or the root terminator). Following it
+      // also accumulates the pointed-to labels into the expanded length.
+      const end = skipNameInner(view, target, len, hops + 1);
+      if (end === -1) return -1;
       return o + 2;
     }
-    if ((len & 0xc0) !== 0) return -1; // reserved label types 01/10
-    if (o + 1 + len > view.byteLength) return -1;
-    o += 1 + len;
+    if ((b & 0xc0) !== 0) return -1; // reserved label types 01/10
+    if (o + 1 + b > view.byteLength) return -1;
+    len += 1 + b; // length octet + label bytes count toward the 255-octet limit
+    if (len > MAX_DNS_NAME_OCTETS) return -1;
+    o += 1 + b;
   }
   return -1;
 }

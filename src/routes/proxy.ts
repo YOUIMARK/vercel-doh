@@ -17,8 +17,9 @@ import { corsHeaders, textError } from "../errors.js";
 
 const JSON_MIME = "application/dns-json";
 
-/** Record types we accept in the `type` param (plus the `all` aggregate). */
-const ALLOWED_TYPES = new Set([
+/** Record types we accept in the `type` param (plus the `all` aggregate).
+ *  Shared with the dns-json API for consistent input validation. */
+export const ALLOWED_TYPES = new Set([
   "ALL", "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV",
   "CAA", "HTTPS", "SVCB", "DS", "DNSKEY", "TLSA", "ANY",
 ]);

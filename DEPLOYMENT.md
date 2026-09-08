@@ -167,7 +167,7 @@ Vercel Firewall 对所有套餐开放,**限流功能 Hobby 免费额度为每月
 
 | 防护 | 位置 |
 |---|---|
-| 请求体 64KB 上限(413) | `src/routes/dns-query.ts` |
+| 请求体 65535 字节上限(413,chunked 增量读取) | `src/routes/dns-query.ts` |
 | 方法白名单 GET/POST(405)、Accept(406)、Content-Type(415) | 同上 |
 | 上游 URL 仅 https 白名单(防 SSRF) | `src/config.ts` |
 | hop-by-hop 头剥离、不转发客户端 IP | `src/upstream.ts` |

@@ -47,6 +47,42 @@ const ECS_FLAGS = new Map<string, EcsBehavior>([
 
 const EMPTY_FLAGS: PathFlags = { family: null, behavior: null, ecsOverrideIp: null, provider: null };
 
+/**
+ * Reads the POST body with a hard INCREMENTAL cap: chunks are accumulated and
+ * the read aborts (and the stream is cancelled) the moment the cap is
+ * exceeded, so a chunked or unknown-length body can never be fully buffered
+ * in memory first. Returns null when the body overruns the cap.
+ */
+async function readBodyBounded(c: Context, maxBytes: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const stream = c.req.raw.body; // underlying Request stream (chunked-safe)
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {}); // tell the client to stop sending
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, o);
+    o += chunk.byteLength;
+  }
+  return out;
+}
+
 export function parsePathFlags(pathname: string, basePath: string): PathFlags {
   const base = basePath.replace(/\/+$/, "");
   if (pathname === base) return { ...EMPTY_FLAGS };
@@ -125,7 +161,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     let message: Uint8Array<ArrayBuffer>;
     if (method === "POST") {
       // Reject oversized POST bodies before reading them (Content-Length),
-      // falling back to the post-read cap below.
+      // falling back to the incremental read cap below.
       const declared = c.req.header("content-length");
       if (declared !== undefined && declared !== "") {
         const n = Number.parseInt(declared, 10);
@@ -137,12 +173,21 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       if (parseMediaType(contentType) !== DNS_MESSAGE) {
         return textError(415, "Unsupported Media Type: application/dns-message required", corsHeaders());
       }
-      const buf = await c.req.arrayBuffer();
-      message = new Uint8Array(buf);
+      // Read the body incrementally and abort as soon as the cap is exceeded:
+      // a chunked / unknown-length body must never be fully buffered first.
+      const read = await readBodyBounded(c, config.maxBodyBytes);
+      if (read === null) return textError(413, "Payload Too Large", corsHeaders());
+      message = read;
     } else {
       const dnsParam = c.req.query("dns") ?? "";
+      // RFC 8484 §4.1: the dns= parameter MUST be unpadded base64url. Reject
+      // legacy padded / standard-base64 forms ("=", "+", "/") and the
+      // impossible length % 4 == 1 outright instead of tolerating them.
+      if (!/^[A-Za-z0-9_-]+$/.test(dnsParam) || dnsParam.length % 4 === 1) {
+        return textError(400, "Invalid dns parameter (base64url, unpadded)", corsHeaders());
+      }
       const decoded = decodeBase64Url(dnsParam);
-      if (!decoded) return textError(400, "Invalid dns parameter (base64url)", corsHeaders());
+      if (!decoded) return textError(400, "Invalid dns parameter (base64url, unpadded)", corsHeaders());
       message = decoded;
     }
 
@@ -171,7 +216,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     if (countOptRrs(message) > 1) {
       return textError(400, "Malformed DNS query (multiple OPT RRs)", corsHeaders());
     }
-    const ecs = ecsStatus(message);
+    const ecs = ecsStatus(message, { asQuery: true });
     if (ecs === "malformed") {
       return textError(400, "Malformed EDNS/ECS option", corsHeaders());
     }
@@ -196,7 +241,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     const shouldAddEcs =
       effectiveBehavior === "force_enable" ||
       (effectiveBehavior === "default" && config.autoAddEcs);
-    if (shouldAddEcs && ecsStatus(message) === "absent") {
+    if (shouldAddEcs && ecsStatus(message, { asQuery: true }) === "absent") {
       // ECS source precedence: URL ecs-<ip> flag > ECS_OVERRIDE_IP env >
       // the client's real IP. When ECS is disabled (no-ecs) this whole block
       // is skipped, so any override is inert.
@@ -214,7 +259,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
 
     // Sensitivity of the OUTGOING query (after stripping/injection): drives
     // both the upstream pool (ECS-aware upstreams) and cache policy.
-    const ecsSensitive = ecsStatus(message) !== "absent";
+    const ecsSensitive = ecsStatus(message, { asQuery: true }) !== "absent";
 
     // ── Answer-family flag: force the question type to A (v4) / AAAA (v6) ──
     // Only rewrites address-type queries (A / AAAA / ANY); other types (MX…)

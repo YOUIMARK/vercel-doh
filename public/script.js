@@ -4,8 +4,9 @@
 // wiring is changed to vercel-doh's backend:
 //   - "当前站点" queries our public /dns-query-json API (v4/v6/ECS/DO/CD
 //     flags come from the advanced options);
-//   - third-party providers are queried directly from the browser (CORS
-//     permitting) — there is NO server-side arbitrary-URL proxy;
+//   - third-party providers go through the server-side /dns-query-proxy
+//     endpoint (mirrors CF-Workers-DoH's ?doh= handler — no CORS wall, and
+//     client headers are never forwarded to the provider);
 //   - all DNS answer rendering uses createElement/textContent (never
 //     innerHTML with answer data);
 //   - the original hardcoded blocked-IP lists and /ip-info proxy are

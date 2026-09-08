@@ -19,6 +19,25 @@ const FAMILY_IPV6 = 2;
 
 export type EcsStatus = "absent" | "zero" | "positive" | "malformed";
 
+/** A parsed ECS option (family, prefixes, address bytes). */
+export interface EcsOption {
+  family: number;
+  sourcePrefix: number;
+  scopePrefix: number;
+  /** Address bytes (exactly ceil(sourcePrefix / 8) octets). */
+  address: Uint8Array<ArrayBuffer>;
+}
+
+export interface EcsStatusOptions {
+  /**
+   * Whether the message is a QUERY (client → proxy). RFC 7871 §7.1.1: in a
+   * query the SCOPE PREFIX-LENGTH MUST be 0 and the address bits beyond the
+   * source prefix MUST be zero. Responses legitimately carry a non-zero scope
+   * (and may echo a truncated address), so those checks only apply to queries.
+   */
+  asQuery?: boolean;
+}
+
 /**
  * Classifies the ECS state of a message:
  *  - "absent":     no ECS option (auto-injection is allowed by policy)
@@ -27,7 +46,7 @@ export type EcsStatus = "absent" | "zero" | "positive" | "malformed";
  *  - "positive":   ECS with source prefix > 0 (client-provided subnet)
  *  - "malformed":  broken OPT/ECS structure (must be rejected)
  */
-export function ecsStatus(msg: Uint8Array): EcsStatus {
+export function ecsStatus(msg: Uint8Array, opts: EcsStatusOptions = {}): EcsStatus {
   const parsed = parseSections(msg);
   if (!parsed) return "malformed";
   if (countOptRrs(msg) > 1) return "malformed"; // RFC 6891: at most one OPT
@@ -52,10 +71,15 @@ export function ecsStatus(msg: Uint8Array): EcsStatus {
         if (len < 4) return "malformed";
         const family = view.getUint16(o + 4);
         const sourcePrefix = view.getUint8(o + 6);
+        const scopePrefix = view.getUint8(o + 7);
         if (family !== FAMILY_IPV4 && family !== FAMILY_IPV6) return "malformed";
         const bits = family === FAMILY_IPV4 ? 32 : 128;
         if (sourcePrefix > bits) return "malformed";
+        if (opts.asQuery && scopePrefix !== 0) return "malformed"; // RFC 7871 §7.1.1
         if (len !== 4 + Math.ceil(sourcePrefix / 8)) return "malformed";
+        if (opts.asQuery && !addressTrailingBitsZero(view, o + 8, sourcePrefix)) {
+          return "malformed"; // RFC 7871 §7.1.1: bits beyond the prefix MUST be zero
+        }
         status = sourcePrefix === 0 ? "zero" : "positive";
       }
       o += 4 + len;
@@ -64,6 +88,44 @@ export function ecsStatus(msg: Uint8Array): EcsStatus {
 
   if (sawEcs) return status ?? "malformed";
   return "absent";
+}
+
+/** Whether the address's bits beyond `sourcePrefix` are all zero. */
+function addressTrailingBitsZero(view: DataView, addressStart: number, sourcePrefix: number): boolean {
+  const addrLen = Math.ceil(sourcePrefix / 8);
+  const remBits = sourcePrefix % 8;
+  if (remBits === 0) return true;
+  const lastByte = view.getUint8(addressStart + addrLen - 1);
+  return (lastByte & (0xff << (8 - remBits))) === lastByte;
+}
+
+/** Returns the first ECS option of a message, or null when absent/malformed. */
+export function findEcs(msg: Uint8Array): EcsOption | null {
+  if (ecsStatus(msg) === "malformed") return null;
+  const parsed = parseSections(msg);
+  if (!parsed) return null;
+  const view = toView(msg);
+  for (const opt of parsed.additional.rrs) {
+    if (opt.rrType !== OPT_RR_TYPE) continue;
+    const end = opt.rdataOffset + opt.rdLength;
+    let o = opt.rdataOffset;
+    while (o + 4 <= end) {
+      const code = view.getUint16(o);
+      const len = view.getUint16(o + 2);
+      if (o + 4 + len > end) return null;
+      if (code === ECS_OPTION_CODE && len >= 4) {
+        const family = view.getUint16(o + 4);
+        const sourcePrefix = view.getUint8(o + 6);
+        const scopePrefix = view.getUint8(o + 7);
+        const addrLen = len - 4;
+        const address = new Uint8Array(addrLen);
+        for (let i = 0; i < addrLen; i++) address[i] = view.getUint8(o + 8 + i);
+        return { family, sourcePrefix, scopePrefix, address };
+      }
+      o += 4 + len;
+    }
+  }
+  return null;
 }
 
 /** Builds the ECS option wire bytes (option code + option data). */
@@ -80,6 +142,13 @@ export function buildEcsOption(ip: IpAddress, prefixLength: number): Uint8Array<
   view.setUint8(6, prefix);
   view.setUint8(7, 0); // SCOPE PREFIX-LENGTH
   out.set(ip.addressBytes.subarray(0, addrLen), 8);
+  // RFC 7871 §7.1.1: bits beyond the source prefix MUST be zero. For a
+  // non-octet prefix (e.g. /21) the raw address byte carries real host bits
+  // below the prefix — mask them off or the option is non-canonical.
+  const remBits = prefix % 8;
+  if (remBits !== 0) {
+    out[8 + addrLen - 1] = (out[8 + addrLen - 1] ?? 0) & (0xff << (8 - remBits));
+  }
   return out;
 }
 

@@ -4,9 +4,10 @@
 // The page structure, classes and visual design are DIRECTLY BORROWED from
 // CF-Workers-DoH (cmliu, MIT) — Bootstrap 5.3 + its original CSS — and only
 // the data wiring is adapted to vercel-doh's backend:
-//   - queries go to our own /dns-query-json (current site) or the selected
-//     provider's dns-json endpoint straight from the browser (no server-side
-//     arbitrary-URL proxy);
+//   - queries go to our own /dns-query-json (current site); third-party
+//     providers go through the server-side /dns-query-proxy endpoint
+//     (mirrors CF-Workers-DoH's ?doh= handler, no CORS wall, no client
+//     headers forwarded);
 //   - the original innerHTML-with-answer-data rendering is replaced by
 //     createElement/textContent (see public/script.js);
 //   - the original hardcoded "blocked IP" lists and /ip-info proxy are
@@ -71,7 +72,8 @@ export function homePage(config: DoHConfig) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="referrer" content="no-referrer">
   <title>DNS-over-HTTPS Resolver</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+    integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
   <link rel="icon"
     href="https://cf-assets.www.cloudflare.com/dzlvafdwdttg/6TaQ8Q7BDmdAFRoHpDCb82/8d9bc52a2ac5af100de3a9adcf99ffaa/security-shield-protection-2.svg"
     type="image/x-icon">
@@ -196,7 +198,8 @@ export function homePage(config: DoHConfig) {
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
   <script src="/script.js"></script>
 </body>
 
@@ -206,6 +209,16 @@ export function homePage(config: DoHConfig) {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, s-maxage=60",
+        // Defense-in-depth: pin scripts/styles to self + the SRI-checked CDN,
+        // allow the browser geo lookup (ipwho.is), and lock framing.
+        "Content-Security-Policy":
+          "default-src 'self'; " +
+          "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; " +
+          "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; " +
+          "img-src 'self' https: data:; " +
+          "connect-src 'self' https://ipwho.is; " +
+          "font-src 'self' https://cdn.jsdelivr.net data:; " +
+          "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
       },
     });
   };

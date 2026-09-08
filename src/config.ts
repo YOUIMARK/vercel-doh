@@ -3,6 +3,7 @@
 
 import { setDebugLogging } from "./log.js";
 import { parseIp } from "./dns/ip.js";
+import { MAX_DNS_MESSAGE_BYTES } from "./dns/wire.js";
 
 export interface DomainMapping {
   /**
@@ -76,7 +77,10 @@ export const DEFAULTS = {
   FORCE_RESPONSE_PADDING: false,
   DEBUG_LOGGING: false,
   APP_VERSION: "1.0.0",
-  MAX_BODY_BYTES: 64 * 1024,
+  // RFC 8484: a DNS message is bounded by the 2-byte length field at
+  // 65535 bytes — 65536 is NOT a legal message size. Used for both the
+  // request body cap and the upstream response cap.
+  MAX_BODY_BYTES: MAX_DNS_MESSAGE_BYTES,
   UPSTREAM_TIMEOUT_MS: 3000,
   MAX_ATTEMPTS: 3,
 } as const;
