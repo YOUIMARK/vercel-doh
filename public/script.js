@@ -33,12 +33,6 @@ const resultPre = document.getElementById("result");
 const getJsonBtn = document.getElementById("getJsonBtn");
 const dohUrlDisplay = document.getElementById("dohUrlDisplay");
 const currentDomain = document.getElementById("currentDomain");
-// 高级选项（仅「当前站点」生效的 vercel-doh 特色）
-const optFamily = document.getElementById("opt-family");
-const optEcs = document.getElementById("opt-ecs");
-const optEcsIp = document.getElementById("opt-ecs-ip");
-const optDo = document.getElementById("opt-do");
-const optCd = document.getElementById("opt-cd");
 // DoH 端点配置卡（SHOW_DOH_ENDPOINT=true 时存在）
 const endpointCode = document.getElementById("endpoint-code");
 const copyEndpoint = document.getElementById("copy-endpoint");
@@ -281,9 +275,9 @@ function displayError(message) {
 
 // ── 查询流程 ────────────────────────────────────────────────────────────
 /** 并发查询 A/AAAA/NS，聚合为 CF 的 {ipv4, ipv6, ns} 结构。 */
-async function resolveAll(doh, domain, isCurrent) {
+async function resolveAll(doh, domain) {
   const settled = await Promise.allSettled(
-    ["A", "AAAA", "NS"].map((t) => queryDns(doh, domain, t, isCurrent)),
+    ["A", "AAAA", "NS"].map((t) => queryDns(doh, domain, t)),
   );
   const aJson = settled[0].status === "fulfilled" ? settled[0].value : null;
   const aaaaJson = settled[1].status === "fulfilled" ? settled[1].value : null;
@@ -313,17 +307,11 @@ async function resolveAll(doh, domain, isCurrent) {
   };
 }
 
-/** 单次 dns-json 查询：当前站点走 /dns-query-json{flags}，第三方直连其端点。 */
-async function queryDns(doh, domain, type, isCurrent) {
+/** 单次 dns-json 查询：当前站点走 /dns-query-json，第三方走服务端代理。 */
+async function queryDns(doh, domain, type) {
   const url = new URL(doh);
   url.searchParams.set("name", domain);
   url.searchParams.set("type", type);
-  if (optDo && optDo.checked) url.searchParams.set("do", "1");
-  if (optCd && optCd.checked) url.searchParams.set("cd", "1");
-  if (isCurrent) {
-    const flags = flagPath(optFamily || { value: "" }, optEcs || { value: "" }, optEcsIp || { value: "" });
-    if (flags) url.pathname = url.pathname.replace(/\/?$/, "") + "/" + flags;
-  }
   const res = await fetch(url.toString(), { headers: { Accept: "application/dns-json" } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -375,7 +363,7 @@ document.getElementById("dns-form").addEventListener("submit", async function (e
   copyBtn.style.display = "none";
 
   try {
-    const data = isCurrent ? await resolveAll(doh, domain, true) : await proxyAll(doh, domain);
+    const data = isCurrent ? await resolveAll(doh, domain) : await proxyAll(doh, domain);
     displayRecords(data);
   } catch (err) {
     displayError("查询失败: " + err.message);
@@ -391,8 +379,7 @@ if (getJsonBtn) {
     if (!domain) { alert("请输入需要解析的域名"); return; }
     const sel = dohSelect.value;
     let doh;
-    let isCurrent = false;
-    if (sel === "current") { doh = currentDohUrl; isCurrent = true; }
+    if (sel === "current") { doh = currentDohUrl; }
     else if (sel === "custom") {
       doh = customDoh.value.trim();
       if (!doh) { alert("请输入自定义 DoH 地址"); return; }
@@ -400,30 +387,15 @@ if (getJsonBtn) {
     if (!/^https:\/\//i.test(doh)) { alert("DoH 地址必须是 https:// 开头"); return; }
     const url = new URL(doh);
     url.searchParams.set("name", domain);
-    if (isCurrent) {
-      const flags = flagPath(optFamily || { value: "" }, optEcs || { value: "" }, optEcsIp || { value: "" });
-      if (flags) url.pathname = url.pathname.replace(/\/?$/, "") + "/" + flags;
-      if (optDo && optDo.checked) url.searchParams.set("do", "1");
-      if (optCd && optCd.checked) url.searchParams.set("cd", "1");
-    }
     window.open(url.toString(), "_blank", "noopener");
   });
 }
 
 // ── 页面初始化 ──────────────────────────────────────────────────────────
 if (dohSelect) {
-  const advancedOptions = document.getElementById("advancedOptions");
-  // 高级选项（地址族/ECS/DO/CD）只对「当前站点」有意义：选其它 DoH 服务时隐藏。
-  function syncAdvancedOptions() {
-    if (advancedOptions) {
-      advancedOptions.style.display = dohSelect.value === "current" ? "" : "none";
-    }
-  }
   dohSelect.addEventListener("change", function () {
     customDohContainer.style.display = this.value === "custom" ? "block" : "none";
-    syncAdvancedOptions();
   });
-  syncAdvancedOptions();
 }
 if (clearBtn) {
   clearBtn.addEventListener("click", function () {

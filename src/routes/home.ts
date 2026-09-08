@@ -131,30 +131,6 @@ export function homePage(config: DoHConfig) {
               <button type="button" class="btn btn-outline-secondary" id="clearBtn">清除</button>
             </div>
           </div>
-          <details class="advanced-options" id="advancedOptions">
-            <summary>高级选项（地址族 / ECS / DNSSEC，仅「当前站点」生效）</summary>
-            <div class="adv-row">
-              <label>地址族
-                <select class="form-select form-select-sm" id="opt-family">
-                  <option value="">自动</option>
-                  <option value="v4">仅 IPv4</option>
-                  <option value="v6">仅 IPv6</option>
-                </select>
-              </label>
-              <label>ECS
-                <select class="form-select form-select-sm" id="opt-ecs">
-                  <option value="">默认</option>
-                  <option value="ecs">开启</option>
-                  <option value="no-ecs">关闭</option>
-                </select>
-              </label>
-              <label>ECS IP 覆盖
-                <input type="text" class="form-control form-control-sm" id="opt-ecs-ip" placeholder="如 8.8.8.8(填写即自动开启 ECS)" autocomplete="off" autocapitalize="none" spellcheck="false" style="width:12rem">
-              </label>
-              <label><input type="checkbox" id="opt-do"> DNSSEC OK (DO)</label>
-              <label><input type="checkbox" id="opt-cd"> 禁用 DNSSEC 校验 (CD)</label>
-            </div>
-          </details>
           <div class="d-flex gap-2">
             <button type="submit" class="btn btn-primary flex-grow-1">解析</button>
             <button type="button" class="btn btn-outline-primary" id="getJsonBtn">Get Json</button>
