@@ -109,7 +109,7 @@ export function homePage(config: DoHConfig) {
               <option value="https://dns.google/resolve">https://dns.google/resolve (谷歌)</option>
               <option value="https://dns.adguard-dns.com/resolve">https://dns.adguard-dns.com/resolve (AdGuard)</option>
               <option value="https://dns.nextdns.io">https://dns.nextdns.io (NextDNS)</option>
-              <option value="https://dns.opendns.com/dns-query">https://dns.opendns.com/dns-query (OpenDNS)</option>
+              <option value="https://v.recipes/dns-query">https://v.recipes/dns-query (v.recipes)</option>
               <option value="custom">自定义...</option>
             </select>
           </div>
