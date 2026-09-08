@@ -73,6 +73,16 @@ ${endpointScript}
   <section class="card">
     <h2>🔍 查询 DNS 记录</h2>
     <form id="dns-form">
+      <label for="doh-provider" class="field-label">DoH 服务</label>
+      <select id="doh-provider">
+        <option value="current" selected>当前站点（本服务，支持 v4/v6/ECS/DO/CD）</option>
+        <option value="https://dns.alidns.com/resolve">阿里 DNS (alidns.com)</option>
+        <option value="https://dns.google/resolve">Google (dns.google)</option>
+        <option value="https://cloudflare-dns.com/resolve">Cloudflare</option>
+        <option value="https://dns.adguard-dns.com/resolve">AdGuard</option>
+        <option value="custom">自定义…</option>
+      </select>
+      <input type="text" id="custom-doh" placeholder="https://example.com/resolve（dns-json 端点）" autocomplete="off" autocapitalize="none" spellcheck="false" hidden>
       <div class="query-grid">
         <input type="text" id="domain" name="domain" placeholder="例如: example.com" autocomplete="off" autocapitalize="none" spellcheck="false" required>
         <input type="text" id="type" name="type" list="type-list" value="A" placeholder="记录类型">
@@ -81,6 +91,7 @@ ${endpointScript}
           <option value="TXT"><option value="NS"><option value="SOA"><option value="PTR">
           <option value="SRV"><option value="CAA"><option value="HTTPS"><option value="SVCB">
           <option value="DS"><option value="DNSKEY"><option value="TLSA"><option value="ANY">
+          <option value="ALL"><!-- 并行查询 A + AAAA + NS，分页展示 -->
         </datalist>
       </div>
       <div class="options">
@@ -104,11 +115,13 @@ ${endpointScript}
         <label><input type="checkbox" id="opt-do"> DNSSEC OK (DO)</label>
         <label><input type="checkbox" id="opt-cd"> 禁用 DNSSEC 校验 (CD)</label>
       </div>
-      <div style="margin-top:0.9rem">
+      <div class="button-row">
         <button type="submit" id="submit-button">
           <span id="button-text">查询</span><span class="spinner" id="spinner"></span>
         </button>
+        <button type="button" id="get-json-btn">Get JSON</button>
       </div>
+      <p class="hint">「地址族 / ECS / ECS IP」为本服务特有选项，仅对「当前站点」生效；第三方服务只传 name/type/do/cd。<code>ALL</code> 并行查询 A/AAAA/NS 并分页展示（借鉴 <a href="https://github.com/cmliu/CF-Workers-DoH" target="_blank" rel="noopener">CF-Workers-DoH</a>）。</p>
     </form>
   </section>
 
@@ -121,7 +134,8 @@ ${endpointScript}
     </div>
   </section>
 
-  <footer>vercel-doh v${config.appVersion} · 部署于 Vercel(Hono + Node.js + Fluid compute)</footer>
+  <footer>vercel-doh v${config.appVersion} · 部署于 Vercel(Hono + Node.js + Fluid compute)<br>
+  前端交互借鉴 <a href="https://github.com/cmliu/CF-Workers-DoH" target="_blank" rel="noopener">CF-Workers-DoH</a></footer>
 </div>
 <script src="/script.js"></script>
 </body>
