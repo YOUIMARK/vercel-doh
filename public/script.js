@@ -30,6 +30,9 @@ const epEcsIp = document.getElementById("ep-ecs-ip");
 const dohProvider = document.getElementById("doh-provider");
 const customDoh = document.getElementById("custom-doh");
 const getJsonBtn = document.getElementById("get-json-btn");
+const copyResultBtn = document.getElementById("copy-result-btn");
+/** Raw JSON of the latest result, for the 复制结果 button. */
+let lastRawJson = "";
 
 // ── DoH endpoint display (client-config builder) ────────────────────────
 // The server injects the configured base path via window.DOH_ENDPOINT
@@ -113,6 +116,18 @@ const RCODE = {
   10: "NOTZONE", 16: "BADVERS", 17: "BADKEY", 18: "BADTIME",
 };
 
+/** Colored badge per record type (borrowed CF-Workers-DoH badge scheme). */
+const BADGES = {
+  1: { label: "A", cls: "b-A" },
+  28: { label: "AAAA", cls: "b-AAAA" },
+  5: { label: "CNAME", cls: "b-CNAME" },
+  2: { label: "NS", cls: "b-NS" },
+  6: { label: "SOA", cls: "b-SOA" },
+};
+function typeMeta(type) {
+  return BADGES[type] || { label: TYPE_NAMES[type] || `TYPE${type}`, cls: "b-other" };
+}
+
 /** Returns an array of text fragments for a record, rendered as <span class="record-part">. */
 function formatRecord(record) {
   const type = TYPE_NAMES[record.type] || `TYPE${record.type}`;
@@ -185,72 +200,69 @@ function copyText(text, targetEl) {
 }
 
 /** Optional geo info for an IP (HTTPS + CORS, no key); fails silently. */
-function loadGeo(ip, span) {
+function loadGeo(ip, container) {
   fetch(`https://ipwho.is/${encodeURIComponent(ip)}`)
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
-      if (!d || d.success === false) { span.textContent = ""; return; }
-      const parts = [];
-      if (d.country) parts.push(d.country);
-      if (d.connection && d.connection.asn) parts.push(`AS${d.connection.asn}`);
-      span.textContent = parts.join(" · ");
+      container.textContent = "";
+      container.classList.remove("geo-loading");
+      if (!d || d.success === false) return;
+      if (d.country) container.append(el("span", "geo-country", d.country));
+      if (d.connection && d.connection.asn) container.append(el("span", "geo-as", `AS${d.connection.asn}`));
     })
-    .catch(() => { span.textContent = ""; });
+    .catch(() => {
+      container.textContent = "";
+      container.classList.remove("geo-loading");
+    });
 }
 
+/** CF-style record card row: copyable value + colored badge + TTL + geo. */
 function renderRecordRow(record) {
-  const tr = document.createElement("tr");
-  tr.append(el("td", "name", record.name));
-  tr.append(el("td", "ttl", humanizeTtl(record.TTL)));
-  const typeTd = el("td", "type");
-  typeTd.append(el("span", "tag", TYPE_NAMES[record.type] || `TYPE${record.type}`));
-  tr.append(typeTd);
-  const dataTd = el("td", "data copyable");
-  dataTd.title = "点击复制";
-  for (const [label, value] of formatRecord(record)) {
-    if (!value && value !== "0") continue;
-    const span = el("span", "record-part");
-    if (label) {
-      const strong = document.createElement("strong");
-      strong.textContent = `${label}: `;
-      span.append(strong);
-    }
-    span.append(document.createTextNode(value));
-    dataTd.append(span);
-  }
-  // Optional geo annotation for A/AAAA answers (best effort, silent failure).
+  const row = el("div", "record");
+
+  const value = el("span", "ip", record.data === undefined ? "" : String(record.data));
+  value.title = "点击复制";
+  value.addEventListener("click", () => copyText(value.textContent.trim(), value));
+
+  const meta = typeMeta(Number(record.type));
+  const badge = el("span", `badge ${meta.cls}`, meta.label);
+
+  const ttl = el("span", "ttl", `TTL: ${humanizeTtl(record.TTL)}`);
+  row.append(value, badge, ttl);
+
   const data = String(record.data || "");
   if ((record.type === 1 || record.type === 28) && looksLikeIp(data)) {
-    const geo = el("span", "geo");
-    dataTd.append(" ");
-    dataTd.append(geo);
+    const geo = el("span", "geo-info geo-loading", "正在获取位置信息…");
+    row.append(geo);
     loadGeo(data, geo);
   }
-  dataTd.addEventListener("click", () => copyText(dataTd.textContent.trim(), dataTd));
-  tr.append(dataTd);
-  return tr;
+  return row;
 }
 
 function renderTable(title, records) {
   const frag = document.createDocumentFragment();
   frag.append(el("div", "section-title", title));
-  const table = document.createElement("table");
-  table.className = "records";
-  const thead = document.createElement("thead");
-  const headRow = document.createElement("tr");
-  for (const h of ["名称", "TTL", "类型", "数据"]) headRow.append(el("th", null, h));
-  thead.append(headRow);
-  table.append(thead);
-  const tbody = document.createElement("tbody");
-  for (const r of records) tbody.append(renderRecordRow(r));
-  table.append(tbody);
-  frag.append(table);
+  const container = el("div", "records");
+  for (const r of records) container.append(renderRecordRow(r));
+  frag.append(container);
   return frag;
 }
 
 function setBanner(kind, message) {
   const banner = el("div", `banner ${kind}`, message);
   results.replaceChildren(banner);
+  if (copyResultBtn) copyResultBtn.style.display = "none";
+}
+
+if (copyResultBtn) {
+  copyResultBtn.addEventListener("click", async () => {
+    if (!lastRawJson) return;
+    try {
+      await navigator.clipboard.writeText(lastRawJson);
+      copyResultBtn.textContent = "已复制 ✓";
+      setTimeout(() => (copyResultBtn.textContent = "复制结果"), 1500);
+    } catch { /* clipboard blocked: ignore */ }
+  });
 }
 
 // ── Provider selection ──────────────────────────────────────────────────
@@ -374,6 +386,8 @@ function renderResult(data, elapsedMs, providerLabel) {
   }
 
   frag.append(rawDetails(data));
+  lastRawJson = JSON.stringify(data, null, 2);
+  if (copyResultBtn) copyResultBtn.style.display = "inline-block";
   results.replaceChildren(frag);
 }
 
@@ -459,6 +473,8 @@ function renderAllResult(settled, name, provider, elapsedMs) {
     }
   }
   panes.raw.append(el("pre", "raw-json", JSON.stringify(merged, null, 2)));
+  lastRawJson = JSON.stringify(merged, null, 2);
+  if (copyResultBtn) copyResultBtn.style.display = "inline-block";
 
   for (const key of Object.keys(panes)) frag.append(panes[key]);
   results.replaceChildren(frag);
