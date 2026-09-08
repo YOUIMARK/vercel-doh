@@ -43,5 +43,9 @@ export function buildCacheControl(input: CacheControlInput): string {
   if (ttl === null) return "no-store";
 
   const capped = Math.max(0, Math.min(ttl, input.cacheMaxAge));
-  return `public, s-maxage=${capped}, stale-while-revalidate=60`;
+  // The serve-stale window never exceeds the entry's own TTL (bounded at 60s):
+  // the CDN may revalidate in the background, but stale data is never served
+  // for longer than the answer would have been considered fresh anyway.
+  const stale = Math.max(0, Math.min(60, capped));
+  return `public, s-maxage=${capped}, stale-while-revalidate=${stale}`;
 }

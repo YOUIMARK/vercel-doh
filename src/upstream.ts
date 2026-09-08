@@ -18,6 +18,24 @@ import { debugLog } from "./log.js";
 
 export class UpstreamError extends Error {}
 
+/**
+ * Error-safe URL for log messages: scheme/host/path only. The query string
+ * (e.g. a DoH GET's `?dns=<base64url payload>`) and any userinfo are stripped
+ * so debug logs never contain the DNS query content or credentials.
+ */
+export function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.href.replace(/\/$/, "");
+  } catch {
+    return "(invalid url)";
+  }
+}
+
 /** A validated, fully-read DNS response from an upstream. */
 export interface UpstreamDnsResult {
   body: Uint8Array<ArrayBuffer>;
@@ -97,27 +115,28 @@ async function fetchValidated(
   requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   const { url: fetchUrl, init } = buildRequest(url, signal);
+  const logUrl = redactUrl(fetchUrl);
   const res = await fetch(fetchUrl, { ...init, redirect: "error" }); // SSRF: never follow redirects
-  if (!res.ok) throw new UpstreamError(`upstream ${fetchUrl} -> ${res.status}`);
+  if (!res.ok) throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
   const contentType = res.headers.get("content-type") ?? "";
   if (parseMediaType(contentType) !== "application/dns-message") {
-    throw new UpstreamError(`upstream ${fetchUrl} -> unexpected content-type ${contentType}`);
+    throw new UpstreamError(`upstream ${logUrl} -> unexpected content-type ${contentType}`);
   }
   // Reject oversized responses up front (Content-Length) and after reading.
   const contentLength = res.headers.get("content-length");
   if (contentLength !== null) {
     const n = Number.parseInt(contentLength, 10);
     if (!Number.isNaN(n) && n > config.maxBodyBytes) {
-      throw new UpstreamError(`upstream ${fetchUrl} -> response too large (${n} bytes)`);
+      throw new UpstreamError(`upstream ${logUrl} -> response too large (${n} bytes)`);
     }
   }
   const body = new Uint8Array(await res.arrayBuffer());
   if (body.length > config.maxBodyBytes) {
-    throw new UpstreamError(`upstream ${fetchUrl} -> response too large (${body.length} bytes)`);
+    throw new UpstreamError(`upstream ${logUrl} -> response too large (${body.length} bytes)`);
   }
   const validated = validateDnsResponse(body, requestMessage);
   if (!validated) {
-    throw new UpstreamError(`upstream ${fetchUrl} -> invalid DNS response`);
+    throw new UpstreamError(`upstream ${logUrl} -> invalid DNS response`);
   }
   return { body, status: res.status, rcode: validated.rcode };
 }

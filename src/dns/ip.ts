@@ -53,8 +53,13 @@ export function parseIpv6(s: string): IpAddress | null {
     return groups;
   };
 
-  const leftGroups = (toGroups(leftRaw) ?? []).filter((g) => g.length > 0);
-  const rightGroups = (toGroups(rightRaw) ?? []).filter((g) => g.length > 0);
+  // Fail closed on any malformed component: a bad IPv4 tail (e.g.
+  // "1::2.3.4.999") must invalidate the whole address, not be swallowed.
+  const left = toGroups(leftRaw);
+  const right = toGroups(rightRaw);
+  if (left === null || right === null) return null;
+  const leftGroups = left.filter((g) => g.length > 0);
+  const rightGroups = right.filter((g) => g.length > 0);
   if (leftGroups.length === 0 && rightGroups.length === 0 && doubleColon === -1) return null;
   const total = leftGroups.length + rightGroups.length;
   if (doubleColon === -1 ? total !== 8 : total > 7) return null;

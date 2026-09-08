@@ -26,7 +26,9 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 - **TTL 感知缓存**: 正向按 Answer 最小 TTL;NXDOMAIN/NODATA 按 RFC 2308
   `min(SOA TTL, SOA.MINIMUM)`(**无 SOA 的负应答不缓存**);
   SERVFAIL/REFUSED/其它 RCODE(含 EDNS extended,如 BADVERS=16)一律 `no-store`;
-  POST / 含 ECS(请求或响应)一律 `no-store`
+  POST / 含 ECS(请求或响应)一律 `no-store`;
+  `stale-while-revalidate` 上限**不超过该应答自身 TTL**(≤60s),
+  过期数据最多按 TTL 时长被背景再验证兜底,绝不超 TTL 长期出 stale
 - **ECS 支持(默认关)**: `/dns-query/auto_ecs` 强制附加、`/dns-query/no_ecs`
   强制禁用(**并剥离客户端已带的 ECS**,而非仅不注入);客户端 IP 取可信头链
   (`x-vercel-forwarded-for` → `x-real-ip` → XFF 最右段),过滤私网/保留地址,
@@ -46,7 +48,9 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
 - **隐私**: 前端**默认隐藏 DoH 端点路径**(路径混淆不泄露);设置
   `SHOW_DOH_ENDPOINT=true` 后前端才显示并可生成客户端端点 URL
 - **代理卫生**: 请求体/上游响应上限 64KB、上游 URL 仅 https 白名单(含 DOMAIN_MAPPINGS)、
-  Content-Type/Accept 按媒体类型精确协商(`;q=0` 即不接受,`application/dns-messageevil` 不匹配)
+  Content-Type/Accept 按媒体类型精确协商(`;q=0` 即不接受,`application/dns-messageevil` 不匹配);
+  GET `dns` 参数按 **base64url** 解码(RFC 8484 canonical 为无 padding 形式,服务端同时容忍
+  少量 legacy padded 输入;对外发送始终是 canonical unpadded)
 
 ## 快速开始
 

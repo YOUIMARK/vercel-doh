@@ -18,7 +18,7 @@ import { acceptsMediaType, parseMediaType } from "../media.js";
 import { parseClientIp } from "../dns/ecs.js";
 import { formatEcsPrefix, parseIp } from "../dns/ip.js";
 import { debugLog } from "../log.js";
-import { UpstreamError } from "../upstream.js";
+import { redactUrl, UpstreamError } from "../upstream.js";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
@@ -136,7 +136,7 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
       const out = new Headers(corsHeaders());
       out.set("Content-Type", "application/json");
       out.set("Cache-Control", cacheControl);
-      debugLog(`dns-json ${name} -> ok (family=${family} ecs=${ecsSensitive} cache=${cacheControl})`);
+      debugLog(`dns-json ok (family=${family} ecs=${ecsSensitive} cache=${cacheControl})`);
       return new Response(JSON.stringify(parsed), { status: 200, headers: out });
     } catch (err) {
       if (err instanceof UpstreamError) {
@@ -169,7 +169,9 @@ function jsonCacheControl(config: DoHConfig, parsed: JsonResponse, ecsSensitive:
   if (ttl === null) return "no-store"; // no usable TTL (e.g. negative w/o SOA)
 
   const capped = Math.max(0, Math.min(ttl, config.cacheMaxAge));
-  return `public, s-maxage=${capped}, stale-while-revalidate=60`;
+  // Serve-stale window never exceeds the entry's own TTL (see cache-control.ts).
+  const stale = Math.max(0, Math.min(60, capped));
+  return `public, s-maxage=${capped}, stale-while-revalidate=${stale}`;
 }
 
 /** Minimum numeric TTL across a dns-json record array, or null. */
@@ -206,6 +208,7 @@ async function fetchJsonWithFailover(
     target.search = params.toString();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+    const logUrl = redactUrl(target.href);
     try {
       const res = await fetch(target.href, {
         method: "GET",
@@ -213,26 +216,26 @@ async function fetchJsonWithFailover(
         signal: controller.signal,
         redirect: "error", // SSRF: never follow redirects
       });
-      if (!res.ok) throw new UpstreamError(`upstream ${target.href} -> ${res.status}`);
+      if (!res.ok) throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
       const contentType = res.headers.get("content-type") ?? "";
       const essence = parseMediaType(contentType);
       if (essence !== JSON_MIME && essence !== "application/json") {
-        throw new UpstreamError(`upstream ${target.href} -> unexpected content-type ${contentType}`);
+        throw new UpstreamError(`upstream ${logUrl} -> unexpected content-type ${contentType}`);
       }
       const contentLength = res.headers.get("content-length");
       if (contentLength !== null) {
         const n = Number.parseInt(contentLength, 10);
         if (!Number.isNaN(n) && n > config.maxBodyBytes) {
-          throw new UpstreamError(`upstream ${target.href} -> response too large (${n} bytes)`);
+          throw new UpstreamError(`upstream ${logUrl} -> response too large (${n} bytes)`);
         }
       }
       const body = new Uint8Array(await res.arrayBuffer());
       if (body.length > config.maxBodyBytes) {
-        throw new UpstreamError(`upstream ${target.href} -> response too large (${body.length} bytes)`);
+        throw new UpstreamError(`upstream ${logUrl} -> response too large (${body.length} bytes)`);
       }
       const parsed = validateJsonResponse(body);
       if (!parsed) {
-        throw new UpstreamError(`upstream ${target.href} -> invalid dns-json response`);
+        throw new UpstreamError(`upstream ${logUrl} -> invalid dns-json response`);
       }
       return parsed;
     } catch (err) {

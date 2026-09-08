@@ -162,7 +162,10 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     if (((queryHeader.flags >> 11) & 0x0f) !== 0) {
       return textError(400, "Invalid DNS query (only standard opcode 0 is proxied)", corsHeaders());
     }
-    if (parseSections(message) === null) {
+    // Structure-complete: every section parses AND the message ends exactly at
+    // the last RR (trailing garbage is malformed, not "extra").
+    const querySections = parseSections(message);
+    if (querySections === null || querySections.additional.nextOffset !== message.length) {
       return textError(400, "Malformed DNS query", corsHeaders());
     }
     if (countOptRrs(message) > 1) {
@@ -312,7 +315,7 @@ function infoText(config: DoHConfig): Response {
 <li><code>/dns-query-json</code> — dns-json API(浏览器查询工具)</li>
 <li><code>/health</code> — 健康检查</li>
 </ul>
-<p>上游: ${config.upstreamUrls.join(", ")}</p>
+<p>上游: 已配置(隐私考虑,不在公开页面展示具体地址)</p>
 </body>
 </html>`;
   return new Response(html, {
