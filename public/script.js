@@ -31,8 +31,6 @@ const errorContainer = document.getElementById("errorContainer");
 const errorMessage = document.getElementById("errorMessage");
 const resultPre = document.getElementById("result");
 const getJsonBtn = document.getElementById("getJsonBtn");
-const dohUrlDisplay = document.getElementById("dohUrlDisplay");
-const currentDomain = document.getElementById("currentDomain");
 // DoH 端点配置卡（SHOW_DOH_ENDPOINT=true 时存在）
 const endpointCode = document.getElementById("endpoint-code");
 const copyEndpoint = document.getElementById("copy-endpoint");
@@ -417,20 +415,6 @@ document.addEventListener("DOMContentLoaded", function () {
   if (domainInput) {
     domainInput.addEventListener("input", function () {
       try { localStorage.setItem("lastDomain", this.value); } catch (e) { /* ignore */ }
-    });
-  }
-
-  if (currentDomain) currentDomain.textContent = currentHost;
-  if (dohUrlDisplay) {
-    dohUrlDisplay.addEventListener("click", function () {
-      handleCopyClick(dohUrlDisplay, currentProtocol + "//" + currentHost + "/dns-query-json");
-    });
-  }
-  const privatePath = document.getElementById("privateDohPath");
-  if (privatePath && privateDohPath) {
-    privatePath.textContent = currentProtocol + "//" + currentHost + privateDohPath;
-    privatePath.addEventListener("click", function () {
-      handleCopyClick(privatePath, privatePath.textContent);
     });
   }
 });

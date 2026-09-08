@@ -27,12 +27,9 @@ export function homePage(config: DoHConfig) {
     const dohEndpoint = config.dohPath;
     // The DoH path is an obfuscation secret — the frontend only shows it when
     // SHOW_DOH_ENDPOINT=true (default: hidden). The JSON tool API
-    // (/dns-query-json) is public by design and always shown.
+    // (/dns-query-json) is public by design.
     const endpointScript = config.showDohEndpoint
       ? `<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>`
-      : "";
-    const privatePathLine = config.showDohEndpoint
-      ? `DoH 端点：<span id="privateDohPath" class="copy-link"></span><br>`
       : "";
     const endpointCard = config.showDohEndpoint
       ? `<div class="card">
@@ -197,10 +194,7 @@ export function homePage(config: DoHConfig) {
     </div>
 
     <div class="beian-info">
-      <p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
-              id="currentDomain">...</span>/dns-query-json</span></strong><br>
-        ${privatePathLine}基于 vercel-doh（Hono + Node.js + Fluid compute）的 DoH (DNS over HTTPS) 解析服务
-      </p>
+      <p>基于 vercel-doh（Hono + Node.js + Fluid compute）的 DoH (DNS over HTTPS) 解析服务</p>
       <p class="footer-attrib">UI 直接借用 <a href="https://github.com/cmliu/CF-Workers-DoH" target="_blank"
           rel="noopener">CF-Workers-DoH</a> · 源码 <a href="https://github.com/YOUIMARK/vercel-doh" target="_blank"
           rel="noopener">YOUIMARK/vercel-doh</a></p>
