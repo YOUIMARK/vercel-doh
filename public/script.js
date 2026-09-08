@@ -332,6 +332,19 @@ async function queryDns(doh, domain, type, isCurrent) {
   return res.json();
 }
 
+/** 第三方 DoH：交给服务端代理查询（原版机制，无 CORS 墙）。 */
+async function proxyAll(doh, domain) {
+  const url =
+    "/dns-query-proxy?doh=" + encodeURIComponent(doh) +
+    "&domain=" + encodeURIComponent(domain) + "&type=all";
+  const res = await fetch(url, { headers: { Accept: "application/dns-json" } });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error("HTTP " + res.status + (body ? ": " + body.slice(0, 200) : ""));
+  }
+  return res.json();
+}
+
 document.getElementById("dns-form").addEventListener("submit", async function (e) {
   e.preventDefault();
 
@@ -362,10 +375,10 @@ document.getElementById("dns-form").addEventListener("submit", async function (e
   copyBtn.style.display = "none";
 
   try {
-    const data = await resolveAll(doh, domain, isCurrent);
+    const data = isCurrent ? await resolveAll(doh, domain, true) : await proxyAll(doh, domain);
     displayRecords(data);
   } catch (err) {
-    displayError("查询失败: " + err.message + (isCurrent ? "" : "（第三方服务需支持 CORS，失败时请改用「自动 (当前站点)」）"));
+    displayError("查询失败: " + err.message);
   } finally {
     loading.style.display = "none";
   }

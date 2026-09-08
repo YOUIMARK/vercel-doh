@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { loadConfig, type DoHConfig } from "./config.js";
 import { handleDnsQuery } from "./routes/dns-query.js";
 import { handleJsonQuery } from "./routes/json.js";
+import { handleDohProxy } from "./routes/proxy.js";
 import { homePage, health } from "./routes/home.js";
 
 export function createApp(config: DoHConfig = loadConfig()): Hono {
@@ -27,6 +28,12 @@ export function createApp(config: DoHConfig = loadConfig()): Hono {
   // e.g. /dns-query-json/v4/ecs).
   app.all("/dns-query-json", handleJsonQuery(config));
   app.all("/dns-query-json/*", handleJsonQuery(config));
+
+  // Server-side query proxy for third-party DoH providers selected in the
+  // web tool (CF-Workers-DoH behavior: the server queries the provider so
+  // the browser never hits CORS walls).
+  app.all("/dns-query-proxy", handleDohProxy(config));
+  app.all("/dns-query-proxy/*", handleDohProxy(config));
 
   return app;
 }
