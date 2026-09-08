@@ -1,43 +1,50 @@
-// vercel-doh — online DNS lookup tool (vanilla JS, no dependencies).
-// Queries the same-origin dns-json endpoint (/dns-query-json) or, when a
-// third-party DoH provider is selected, that provider's dns-json endpoint
-// directly from the browser (CORS permitting).
-//
-// Borrowed from CF-Workers-DoH (cmliu) and adapted: multi-provider selection,
-// parallel A/AAAA/NS lookup with tabbed results, click-to-copy, optional IP
-// geo info, last-domain memory. All DNS answer rendering uses
-// createElement/textContent — never innerHTML with answer data.
+// vercel-doh — online DNS lookup tool (vanilla JS, Bootstrap tabs).
+// Directly adapted from CF-Workers-DoH's inline script (cmliu, MIT):
+// the query flow, tabs, copy and TTL formatting are borrowed; the data
+// wiring is changed to vercel-doh's backend:
+//   - "当前站点" queries our public /dns-query-json API (v4/v6/ECS/DO/CD
+//     flags come from the advanced options);
+//   - third-party providers are queried directly from the browser (CORS
+//     permitting) — there is NO server-side arbitrary-URL proxy;
+//   - all DNS answer rendering uses createElement/textContent (never
+//     innerHTML with answer data);
+//   - the original hardcoded blocked-IP lists and /ip-info proxy are
+//     dropped; geo info comes from ipwho.is over HTTPS + CORS.
 
 "use strict";
 
-const form = document.getElementById("dns-form");
+const currentHost = window.location.host;
+const currentProtocol = window.location.protocol;
+// 当前站点 = 本站公开的 dns-json 工具 API（固定路径，非私密 DoH 端点）。
+const currentDohUrl = currentProtocol + "//" + currentHost + "/dns-query-json";
+const privateDohPath = window.DOH_ENDPOINT || null;
+
+const dohSelect = document.getElementById("dohSelect");
+const customDohContainer = document.getElementById("customDohContainer");
+const customDoh = document.getElementById("customDoh");
 const domainInput = document.getElementById("domain");
-const typeInput = document.getElementById("type");
-const doCheckbox = document.getElementById("opt-do");
-const cdCheckbox = document.getElementById("opt-cd");
-const familySelect = document.getElementById("opt-family");
-const ecsSelect = document.getElementById("opt-ecs");
-const ecsIpInput = document.getElementById("opt-ecs-ip");
-const submitButton = document.getElementById("submit-button");
-const buttonText = document.getElementById("button-text");
-const spinner = document.getElementById("spinner");
-const results = document.getElementById("results");
+const clearBtn = document.getElementById("clearBtn");
+const copyBtn = document.getElementById("copyBtn");
+const loading = document.getElementById("loading");
+const resultContainer = document.getElementById("resultContainer");
+const errorContainer = document.getElementById("errorContainer");
+const errorMessage = document.getElementById("errorMessage");
+const resultPre = document.getElementById("result");
+const getJsonBtn = document.getElementById("getJsonBtn");
+const dohUrlDisplay = document.getElementById("dohUrlDisplay");
+const currentDomain = document.getElementById("currentDomain");
+// 高级选项（仅「当前站点」生效的 vercel-doh 特色）
+const optFamily = document.getElementById("opt-family");
+const optEcs = document.getElementById("opt-ecs");
+const optEcsIp = document.getElementById("opt-ecs-ip");
+const optDo = document.getElementById("opt-do");
+const optCd = document.getElementById("opt-cd");
+// DoH 端点配置卡（SHOW_DOH_ENDPOINT=true 时存在）
 const endpointCode = document.getElementById("endpoint-code");
-const copyButton = document.getElementById("copy-endpoint");
+const copyEndpoint = document.getElementById("copy-endpoint");
 const epFamily = document.getElementById("ep-family");
 const epEcs = document.getElementById("ep-ecs");
 const epEcsIp = document.getElementById("ep-ecs-ip");
-const dohProvider = document.getElementById("doh-provider");
-const customDoh = document.getElementById("custom-doh");
-const getJsonBtn = document.getElementById("get-json-btn");
-const copyResultBtn = document.getElementById("copy-result-btn");
-/** Raw JSON of the latest result, for the 复制结果 button. */
-let lastRawJson = "";
-
-// ── DoH endpoint display (client-config builder) ────────────────────────
-// The server injects the configured base path via window.DOH_ENDPOINT
-// (path obfuscation); default to /dns-query when absent.
-const dohPath = window.DOH_ENDPOINT || "/dns-query";
 
 /** Loose client-side IP check (the server validates strictly). */
 function looksLikeIp(value) {
@@ -55,33 +62,21 @@ function flagPath(familySel, ecsSel, ecsIpSel) {
   if (ecs === "no-ecs") {
     ecsFlag = "no-ecs";
   } else if (overrideIp && looksLikeIp(overrideIp)) {
-    ecsFlag = `ecs-${overrideIp}`;
+    ecsFlag = "ecs-" + overrideIp;
   } else {
     ecsFlag = ecs;
   }
   return [family, ecsFlag].filter(Boolean).join("/");
 }
 
-// Selecting an address family auto-switches the record type to match:
-// 仅IPv6 → AAAA, 仅IPv4 → A (when the type is an address type / ANY / empty).
-if (familySelect) {
-  familySelect.addEventListener("change", () => {
-    const type = (typeInput.value || "").trim().toUpperCase();
-    if (familySelect.value === "v6" && (type === "" || type === "A" || type === "ANY")) {
-      typeInput.value = "AAAA";
-    } else if (familySelect.value === "v4" && (type === "" || type === "AAAA" || type === "ANY")) {
-      typeInput.value = "A";
-    }
-  });
-}
-
+// ── DoH endpoint builder (client-config) ────────────────────────────────
 function renderEndpoint() {
   const flags = flagPath(
     epFamily || { value: "" },
     epEcs || { value: "" },
     epEcsIp || { value: "" },
   );
-  const endpoint = `${location.origin}${dohPath}${flags ? "/" + flags : ""}`;
+  const endpoint = currentProtocol + "//" + currentHost + (privateDohPath || "/dns-query") + (flags ? "/" + flags : "");
   if (endpointCode) endpointCode.textContent = endpoint;
   return endpoint;
 }
@@ -91,124 +86,48 @@ if (epFamily) epFamily.addEventListener("change", () => (currentEndpoint = rende
 if (epEcs) epEcs.addEventListener("change", () => (currentEndpoint = renderEndpoint()));
 if (epEcsIp) epEcsIp.addEventListener("input", () => (currentEndpoint = renderEndpoint()));
 
-if (copyButton) {
-  copyButton.addEventListener("click", async () => {
+if (copyEndpoint) {
+  copyEndpoint.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(currentEndpoint);
-      copyButton.textContent = "已复制 ✓";
-      setTimeout(() => (copyButton.textContent = "复制"), 1500);
+      copyEndpoint.textContent = "已复制 ✓";
+      setTimeout(() => (copyEndpoint.textContent = "复制"), 1500);
     } catch {
-      copyButton.textContent = "复制失败";
+      copyEndpoint.textContent = "复制失败";
     }
   });
 }
 
-// ── DNS record formatting ───────────────────────────────────────────────
-const TYPE_NAMES = {
-  1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX", 16: "TXT",
-  28: "AAAA", 33: "SRV", 43: "DS", 46: "RRSIG", 48: "DNSKEY", 52: "TLSA",
-  64: "SVCB", 65: "HTTPS", 257: "CAA",
-};
-
-const RCODE = {
-  0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP",
-  5: "REFUSED", 6: "YXDOMAIN", 7: "YXRRSET", 8: "NXRRSET", 9: "NOTAUTH",
-  10: "NOTZONE", 16: "BADVERS", 17: "BADKEY", 18: "BADTIME",
-};
-
-/** Colored badge per record type (borrowed CF-Workers-DoH badge scheme). */
-const BADGES = {
-  1: { label: "A", cls: "b-A" },
-  28: { label: "AAAA", cls: "b-AAAA" },
-  5: { label: "CNAME", cls: "b-CNAME" },
-  2: { label: "NS", cls: "b-NS" },
-  6: { label: "SOA", cls: "b-SOA" },
-};
-function typeMeta(type) {
-  return BADGES[type] || { label: TYPE_NAMES[type] || `TYPE${type}`, cls: "b-other" };
-}
-
-/** Returns an array of text fragments for a record, rendered as <span class="record-part">. */
-function formatRecord(record) {
-  const type = TYPE_NAMES[record.type] || `TYPE${record.type}`;
-  const data = String(record.data || "");
-
-  switch (type) {
-    case "MX": {
-      const [prio, host] = data.split(/\s+/);
-      return [["优先级", prio], ["", host]];
-    }
-    case "SRV": {
-      const [prio, weight, port, target] = data.split(/\s+/);
-      return [["优先级", prio], ["权重", weight], ["端口", port], ["", target]];
-    }
-    case "CAA": {
-      const [flags, tag, ...value] = data.split(/\s+/);
-      return [["标记", flags], ["标签", tag], ["值", value.join(" ")]];
-    }
-    case "SOA": {
-      const parts = data.split(/\s+/);
-      if (parts.length >= 7) {
-        return [
-          ["主服务器", parts[0]], ["负责人", parts[1]],
-          ["序列号", parts[2]], ["刷新", parts[3]],
-          ["重试", parts[4]], ["过期", parts[5]], ["最小TTL", parts[6]],
-        ];
-      }
-      return [["", data]];
-    }
-    case "TXT":
-      // Google wraps TXT data in quotes; strip them for readability.
-      return [["", data.replace(/^"|"$/g, "").replace(/""/g, '"')]];
-    case "HTTPS":
-    case "SVCB": {
-      const [prio, target, ...params] = data.split(/\s+/);
-      return [["优先级", prio], ["目标", target], ["参数", params.join(" ")]];
-    }
-    default:
-      return [["", data]];
-  }
-}
-
-function humanizeTtl(seconds) {
+// ── 格式化 TTL（借用 CF） ────────────────────────────────────────────────
+function formatTTL(seconds) {
   const s = Number(seconds);
   if (!Number.isFinite(s) || s < 0) return "-";
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m${s % 60 ? " " + (s % 60) + "s" : ""}`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
+  if (s < 60) return s + "秒";
+  if (s < 3600) return Math.floor(s / 60) + "分钟";
+  if (s < 86400) return Math.floor(s / 3600) + "小时";
+  return Math.floor(s / 86400) + "天";
 }
 
-// ── Safe DOM rendering (never innerHTML with external data) ─────────────
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-/** Copies text to the clipboard with a brief ✓ feedback on the element. */
-function copyText(text, targetEl) {
-  if (!navigator.clipboard) return;
-  navigator.clipboard.writeText(text).then(() => {
-    if (!targetEl) return;
-    targetEl.classList.add("copied");
-    setTimeout(() => targetEl.classList.remove("copied"), 1500);
-  }).catch(() => {
-    /* clipboard blocked (http / permissions): ignore */
-  });
-}
-
-/** Optional geo info for an IP (HTTPS + CORS, no key); fails silently. */
+// ── IP 地理位置（浏览器直连 ipwho.is，HTTPS+CORS 无 key，失败静默）──────
 function loadGeo(ip, container) {
-  fetch(`https://ipwho.is/${encodeURIComponent(ip)}`)
+  fetch("https://ipwho.is/" + encodeURIComponent(ip))
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       container.textContent = "";
       container.classList.remove("geo-loading");
       if (!d || d.success === false) return;
-      if (d.country) container.append(el("span", "geo-country", d.country));
-      if (d.connection && d.connection.asn) container.append(el("span", "geo-as", `AS${d.connection.asn}`));
+      if (d.country) {
+        const c = document.createElement("span");
+        c.className = "geo-country";
+        c.textContent = d.country;
+        container.append(c);
+      }
+      if (d.connection && d.connection.asn) {
+        const a = document.createElement("span");
+        a.className = "geo-as";
+        a.textContent = "AS" + d.connection.asn;
+        container.append(a);
+      }
     })
     .catch(() => {
       container.textContent = "";
@@ -216,350 +135,308 @@ function loadGeo(ip, container) {
     });
 }
 
-/** CF-style record card row: copyable value + colored badge + TTL + geo. */
-function renderRecordRow(record) {
-  const row = el("div", "record");
+/** 点击复制（借用 CF 交互：元素后追加“✓ 已复制”反馈）。 */
+function handleCopyClick(element, textToCopy) {
+  if (!navigator.clipboard) return;
+  navigator.clipboard.writeText(textToCopy).then(() => {
+    element.classList.add("copied");
+    setTimeout(() => element.classList.remove("copied"), 1800);
+  }).catch(() => { /* clipboard blocked: ignore */ });
+}
 
-  const value = el("span", "ip", record.data === undefined ? "" : String(record.data));
-  value.title = "点击复制";
-  value.addEventListener("click", () => copyText(value.textContent.trim(), value));
-
-  const meta = typeMeta(Number(record.type));
-  const badge = el("span", `badge ${meta.cls}`, meta.label);
-
-  const ttl = el("span", "ttl", `TTL: ${humanizeTtl(record.TTL)}`);
-  row.append(value, badge, ttl);
-
-  const data = String(record.data || "");
-  if ((record.type === 1 || record.type === 28) && looksLikeIp(data)) {
-    const geo = el("span", "geo-info geo-loading", "正在获取位置信息…");
-    row.append(geo);
-    loadGeo(data, geo);
+// ── 记录渲染（安全 DOM，绝不 innerHTML 拼接应答数据）────────────────────
+function makeBadge(type) {
+  const badge = document.createElement("span");
+  if (type === 5) {
+    badge.className = "badge bg-success";
+    badge.textContent = "CNAME";
+  } else if (type === 2) {
+    badge.className = "badge bg-info";
+    badge.textContent = "NS";
+  } else if (type === 6) {
+    badge.className = "badge bg-warning";
+    badge.textContent = "SOA";
+  } else {
+    badge.className = "badge bg-secondary";
+    badge.textContent = "类型: " + type;
   }
+  return badge;
+}
+
+/** 普通记录行：可复制值 + 徽章(非 A/AAAA) + 地理位置(A/AAAA) + TTL。 */
+function makeRecordRow(record) {
+  const row = document.createElement("div");
+  row.className = "d-flex justify-content-between align-items-center";
+
+  const value = document.createElement("span");
+  value.className = "ip-address";
+  const data = String(record.data === undefined ? "" : record.data);
+  value.textContent = data;
+  value.title = "点击复制";
+  value.addEventListener("click", function () { handleCopyClick(this, data); });
+  row.append(value);
+
+  if (record.type !== 1 && record.type !== 28) row.append(makeBadge(record.type));
+
+  if (record.type === 1 || record.type === 28) {
+    const geo = document.createElement("span");
+    geo.className = "geo-info geo-loading";
+    geo.textContent = "正在获取位置信息...";
+    row.append(geo);
+    if (looksLikeIp(data)) loadGeo(data, geo);
+  }
+
+  const ttl = document.createElement("span");
+  ttl.className = "text-muted ttl-info";
+  ttl.textContent = "TTL: " + formatTTL(record.TTL);
+  row.append(ttl);
   return row;
 }
 
-function renderTable(title, records) {
-  const frag = document.createDocumentFragment();
-  frag.append(el("div", "section-title", title));
-  const container = el("div", "records");
-  for (const r of records) container.append(renderRecordRow(r));
-  frag.append(container);
-  return frag;
-}
+/** SOA 详情行（借用 CF 的字段拆分：主 NS / 管理邮箱 / 序列号 / 刷新 / 重试 / 过期 / 最小TTL）。 */
+function makeSoaRow(record) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "ip-record";
 
-function setBanner(kind, message) {
-  const banner = el("div", `banner ${kind}`, message);
-  results.replaceChildren(banner);
-  if (copyResultBtn) copyResultBtn.style.display = "none";
-}
+  const top = document.createElement("div");
+  top.className = "d-flex justify-content-between align-items-center mb-2";
+  const name = document.createElement("span");
+  name.className = "ip-address";
+  name.textContent = String(record.name || "");
+  name.addEventListener("click", function () { handleCopyClick(this, name.textContent); });
+  top.append(name, makeBadge(6));
+  const ttl = document.createElement("span");
+  ttl.className = "text-muted ttl-info";
+  ttl.textContent = "TTL: " + formatTTL(record.TTL);
+  top.append(ttl);
+  wrapper.append(top);
 
-if (copyResultBtn) {
-  copyResultBtn.addEventListener("click", async () => {
-    if (!lastRawJson) return;
-    try {
-      await navigator.clipboard.writeText(lastRawJson);
-      copyResultBtn.textContent = "已复制 ✓";
-      setTimeout(() => (copyResultBtn.textContent = "复制结果"), 1500);
-    } catch { /* clipboard blocked: ignore */ }
-  });
-}
-
-// ── Provider selection ──────────────────────────────────────────────────
-function toggleCustomDoh() {
-  if (customDoh) customDoh.hidden = dohProvider.value !== "custom";
-}
-
-function selectedProvider() {
-  const value = dohProvider.value;
-  if (value === "current") return { base: "", isCurrent: true, label: "当前站点" };
-  if (value === "custom") {
-    const u = (customDoh.value || "").trim();
-    return { base: u, isCurrent: false, label: u || "自定义" };
+  const parts = String(record.data || "").split(/\s+/);
+  if (parts.length >= 7) {
+    let adminEmail = parts[1].replace(".", "@");
+    if (adminEmail.endsWith(".")) adminEmail = adminEmail.slice(0, -1);
+    const rows = [
+      ["主 NS", parts[0]],
+      ["管理邮箱", adminEmail],
+      ["序列号", parts[2]],
+      ["刷新间隔", formatTTL(parts[3])],
+      ["重试间隔", formatTTL(parts[4])],
+      ["过期时间", formatTTL(parts[5])],
+      ["最小 TTL", formatTTL(parts[6])],
+    ];
+    const detail = document.createElement("div");
+    detail.className = "ps-3 small";
+    for (const [label, val] of rows) {
+      const line = document.createElement("div");
+      const strong = document.createElement("strong");
+      strong.textContent = label + ": ";
+      const span = document.createElement("span");
+      span.className = "ip-address";
+      span.textContent = val;
+      span.addEventListener("click", function () { handleCopyClick(this, val); });
+      line.append(strong, span);
+      detail.append(line);
+    }
+    wrapper.append(detail);
   }
-  return { base: value, isCurrent: false, label: value };
+  return wrapper;
 }
 
-/**
- * Builds the dns-json URL for the selected provider.
- * Current site: same-origin /dns-query-json with our URL flags
- * (v4/v6/ecs/no-ecs/ecs-<ip>); third-party: their endpoint + name/type/do/cd.
- */
-function jsonQueryUrl(provider, params) {
-  if (provider.isCurrent) {
-    const flags = flagPath(familySelect || { value: "" }, ecsSelect || { value: "" }, ecsIpInput || { value: "" });
-    return `/dns-query-json${flags ? "/" + flags : ""}?${params.toString()}`;
+function renderPane(containerId, summaryId, records, emptyText) {
+  const container = document.getElementById(containerId);
+  const summary = document.getElementById(summaryId);
+  container.textContent = "";
+  if (!records || records.length === 0) {
+    summary.textContent = emptyText;
+    return;
   }
-  return `${provider.base}?${params.toString()}`;
+  summary.textContent = "找到 " + records.length + " 条记录";
+  for (const r of records) {
+    const wrap = document.createElement("div");
+    wrap.className = "ip-record";
+    wrap.append(r.type === 6 ? makeSoaRow(r) : makeRecordRow(r));
+    container.append(wrap);
+  }
 }
 
-/** Fetches one dns-json query from the selected provider. */
-async function fetchJson(provider, name, type) {
-  const params = new URLSearchParams({ name, type });
-  if (doCheckbox.checked) params.set("do", "1");
-  if (cdCheckbox.checked) params.set("cd", "1");
-  const res = await fetch(jsonQueryUrl(provider, params), {
-    headers: { Accept: "application/dns-json" },
-  });
+/** 展示聚合结果（CF 结构：ipv4/ipv6/ns + 原始数据）。 */
+function displayRecords(data) {
+  resultContainer.style.display = "block";
+  errorContainer.style.display = "none";
+  resultPre.textContent = JSON.stringify(data, null, 2);
+
+  renderPane("ipv4Records", "ipv4Summary", (data.ipv4 && data.ipv4.records) || [], "未找到 IPv4 记录");
+  renderPane("ipv6Records", "ipv6Summary", (data.ipv6 && data.ipv6.records) || [], "未找到 IPv6 记录");
+  renderPane("nsRecords", "nsSummary", (data.ns && data.ns.records) || [], "未找到 NS/SOA 记录");
+
+  copyBtn.style.display = "block";
+}
+
+function displayError(message) {
+  resultContainer.style.display = "none";
+  errorContainer.style.display = "block";
+  errorMessage.textContent = message;
+  copyBtn.style.display = "none";
+}
+
+// ── 查询流程 ────────────────────────────────────────────────────────────
+/** 并发查询 A/AAAA/NS，聚合为 CF 的 {ipv4, ipv6, ns} 结构。 */
+async function resolveAll(doh, domain, isCurrent) {
+  const settled = await Promise.allSettled(
+    ["A", "AAAA", "NS"].map((t) => queryDns(doh, domain, t, isCurrent)),
+  );
+  const aJson = settled[0].status === "fulfilled" ? settled[0].value : null;
+  const aaaaJson = settled[1].status === "fulfilled" ? settled[1].value : null;
+  const nsJson = settled[2].status === "fulfilled" ? settled[2].value : null;
+
+  const nsRecords = [];
+  if (nsJson) {
+    for (const key of ["Answer", "Authority"]) {
+      if (Array.isArray(nsJson[key])) {
+        for (const r of nsJson[key]) {
+          if (r.type === 2 || r.type === 6) nsRecords.push(r);
+        }
+      }
+    }
+  }
+  return {
+    Status: (aJson && aJson.Status) || (aaaaJson && aaaaJson.Status) || (nsJson && nsJson.Status) || 0,
+    Question: [],
+    Answer: [
+      ...((aJson && aJson.Answer) || []),
+      ...((aaaaJson && aaaaJson.Answer) || []),
+      ...nsRecords,
+    ],
+    ipv4: { records: (aJson && aJson.Answer) || [] },
+    ipv6: { records: (aaaaJson && aaaaJson.Answer) || [] },
+    ns: { records: nsRecords },
+  };
+}
+
+/** 单次 dns-json 查询：当前站点走 /dns-query-json{flags}，第三方直连其端点。 */
+async function queryDns(doh, domain, type, isCurrent) {
+  const url = new URL(doh);
+  url.searchParams.set("name", domain);
+  url.searchParams.set("type", type);
+  if (optDo && optDo.checked) url.searchParams.set("do", "1");
+  if (optCd && optCd.checked) url.searchParams.set("cd", "1");
+  if (isCurrent) {
+    const flags = flagPath(optFamily || { value: "" }, optEcs || { value: "" }, optEcsIp || { value: "" });
+    if (flags) url.pathname = url.pathname.replace(/\/?$/, "") + "/" + flags;
+  }
+  const res = await fetch(url.toString(), { headers: { Accept: "application/dns-json" } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    throw new Error("HTTP " + res.status + (body ? ": " + body.slice(0, 200) : ""));
   }
   return res.json();
 }
 
-// ── Query flow ──────────────────────────────────────────────────────────
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+document.getElementById("dns-form").addEventListener("submit", async function (e) {
+  e.preventDefault();
 
-  const name = domainInput.value.trim();
-  const type = (typeInput.value.trim() || "A").toUpperCase();
-  if (!name) {
-    setBanner("err", "请输入要查询的域名。");
-    domainInput.focus();
+  const sel = dohSelect.value;
+  let doh;
+  let isCurrent = false;
+  if (sel === "current") {
+    doh = currentDohUrl;
+    isCurrent = true;
+  } else if (sel === "custom") {
+    doh = customDoh.value.trim();
+    if (!doh) { alert("请输入自定义 DoH 地址"); return; }
+  } else {
+    doh = sel;
+  }
+  if (!/^https:\/\//i.test(doh)) {
+    alert("DoH 地址必须是 https:// 开头");
     return;
   }
 
-  const provider = selectedProvider();
-  if (!provider.isCurrent && !/^https:\/\//i.test(provider.base)) {
-    setBanner("err", "请选择有效的 DoH 服务，或在「自定义」中填写 https:// 开头的 dns-json 地址。");
-    return;
-  }
+  const domain = domainInput.value.trim();
+  if (!domain) { alert("请输入需要解析的域名"); return; }
+  if (!/^[a-zA-Z0-9._-]{1,253}$/.test(domain)) { alert("域名包含非法字符"); return; }
 
-  results.replaceChildren(el("p", "placeholder", "查询中…"));
-  submitButton.disabled = true;
-  buttonText.style.display = "none";
-  spinner.style.display = "inline-block";
-  const startedAt = performance.now();
+  loading.style.display = "block";
+  resultContainer.style.display = "none";
+  errorContainer.style.display = "none";
+  copyBtn.style.display = "none";
 
   try {
-    if (type === "ALL") {
-      const settled = await Promise.allSettled(
-        ["A", "AAAA", "NS"].map((t) => fetchJson(provider, name, t)),
-      );
-      renderAllResult(settled, name, provider, Math.round(performance.now() - startedAt));
-    } else {
-      const data = await fetchJson(provider, name, type);
-      renderResult(data, Math.round(performance.now() - startedAt), provider.label);
-    }
+    const data = await resolveAll(doh, domain, isCurrent);
+    displayRecords(data);
   } catch (err) {
-    setBanner("err", `查询失败: ${err.message}${provider.isCurrent ? "" : "（第三方服务需支持 CORS，失败时请改用「当前站点」）"}`);
+    displayError("查询失败: " + err.message + (isCurrent ? "" : "（第三方服务需支持 CORS，失败时请改用「自动 (当前站点)」）"));
   } finally {
-    submitButton.disabled = false;
-    buttonText.style.display = "inline-block";
-    spinner.style.display = "none";
+    loading.style.display = "none";
   }
 });
 
-function statusName(status) {
-  return RCODE[Number(status)] || `RCODE${status}`;
-}
-
-function renderResult(data, elapsedMs, providerLabel) {
-  const frag = document.createDocumentFragment();
-  const status = Number(data.Status);
-  const statusName_ = statusName(status);
-
-  const bannerKind = status === 0 ? "ok" : status === 3 ? "warn" : "err";
-  const bannerMsg =
-    status === 0
-      ? `查询成功 (${statusName_})`
-      : status === 3
-        ? `域名不存在 (${statusName_})`
-        : `查询异常 (${statusName_})`;
-  frag.append(el("div", `banner ${bannerKind}`, bannerMsg));
-
-  const meta = el("div", "meta");
-  meta.append(el("span", null, `耗时: ${elapsedMs} ms`));
-  if (providerLabel) meta.append(el("span", null, `服务: ${providerLabel}`));
-  meta.append(el("span", null, `RCODE: ${status} (${statusName_})`));
-  if (data.Question && data.Question[0]) {
-    meta.append(el("span", null, `${data.Question[0].name} ${TYPE_NAMES[data.Question[0].type] || data.Question[0].type}`));
-  }
-  frag.append(meta);
-
-  if (data.Answer && data.Answer.length) frag.append(renderTable("应答 (Answer)", data.Answer));
-  if (data.Authority && data.Authority.length) frag.append(renderTable("权威 (Authority)", data.Authority));
-  if (data.Additional && data.Additional.length) frag.append(renderTable("附加 (Additional)", data.Additional));
-  if (!data.Answer && !data.Authority && !data.Additional) {
-    frag.append(el("p", "placeholder", "该查询没有返回任何记录。"));
-  }
-
-  frag.append(rawDetails(data));
-  lastRawJson = JSON.stringify(data, null, 2);
-  if (copyResultBtn) copyResultBtn.style.display = "inline-block";
-  results.replaceChildren(frag);
-}
-
-function rawDetails(data) {
-  const raw = document.createElement("details");
-  raw.className = "raw";
-  raw.append(el("summary", null, "查看原始 JSON"));
-  raw.append(el("pre", "raw-json", JSON.stringify(data, null, 2)));
-  return raw;
-}
-
-/** Renders a banner + meta line shared by the tabbed ALL-mode view. */
-function allResultBanner(settled, name, providerLabel, elapsedMs) {
-  const frag = document.createDocumentFragment();
-  const failures = settled.filter((s) => s.status === "rejected").length;
-  const bannerKind = failures === 3 ? "err" : failures > 0 ? "warn" : "ok";
-  const bannerMsg = failures === 3
-    ? "A / AAAA / NS 全部查询失败"
-    : failures > 0
-      ? `A / AAAA / NS 并行查询完成（${failures} 项失败，见各分页）`
-      : "A / AAAA / NS 并行查询成功";
-  frag.append(el("div", `banner ${bannerKind}`, bannerMsg));
-
-  const meta = el("div", "meta");
-  meta.append(el("span", null, `耗时: ${elapsedMs} ms`));
-  meta.append(el("span", null, `服务: ${providerLabel}`));
-  meta.append(el("span", null, `域名: ${name}`));
-  frag.append(meta);
-  return frag;
-}
-
-/** Tabbed results for the parallel A/AAAA/NS lookup (borrowed UX). */
-function renderAllResult(settled, name, provider, elapsedMs) {
-  const frag = document.createDocumentFragment();
-  frag.append(allResultBanner(settled, name, provider.label, elapsedMs));
-
-  const [aJson, aaaaJson, nsJson] = settled.map((s) => (s.status === "fulfilled" ? s.value : null));
-
-  // Tab bar
-  const tabs = el("div", "tabs");
-  const tabDefs = [
-    ["ipv4", "IPv4 地址"],
-    ["ipv6", "IPv6 地址"],
-    ["ns", "NS 记录"],
-    ["raw", "原始数据"],
-  ];
-  const tabButtons = [];
-  for (const [key, label] of tabDefs) {
-    const b = el("button", "tab" + (key === "ipv4" ? " active" : ""), label);
-    b.type = "button";
-    b.dataset.pane = key;
-    tabs.append(b);
-    tabButtons.push(b);
-  }
-  frag.append(tabs);
-
-  const panes = {
-    ipv4: el("div", "pane"),
-    ipv6: el("div", "pane hidden"),
-    ns: el("div", "pane hidden"),
-    raw: el("div", "pane hidden"),
-  };
-  tabs.addEventListener("click", (e) => {
-    const btn = e.target.closest(".tab");
-    if (!btn) return;
-    for (const b of tabButtons) b.classList.toggle("active", b === btn);
-    for (const key of Object.keys(panes)) panes[key].classList.toggle("hidden", key !== btn.dataset.pane);
-  });
-
-  // IPv4 / IPv6 panes: all records returned by the A / AAAA query
-  // (may include CNAME chains), NS pane: NS + SOA records from the NS query.
-  fillPane(panes.ipv4, aJson, "A", "未找到 A 记录（或查询失败）");
-  fillPane(panes.ipv6, aaaaJson, "AAAA", "未找到 AAAA 记录（或查询失败）");
-  fillPaneNs(panes.ns, nsJson);
-
-  // Raw pane: merged Google-style payload.
-  const merged = { Status: null, Question: [], Answer: [], Authority: [], Additional: [] };
-  for (const j of [aJson, aaaaJson, nsJson]) {
-    if (!j) continue;
-    if (typeof j.Status === "number" && merged.Status === null) merged.Status = j.Status;
-    for (const key of ["Question", "Answer", "Authority", "Additional"]) {
-      if (Array.isArray(j[key])) merged[key].push(...j[key]);
-    }
-  }
-  panes.raw.append(el("pre", "raw-json", JSON.stringify(merged, null, 2)));
-  lastRawJson = JSON.stringify(merged, null, 2);
-  if (copyResultBtn) copyResultBtn.style.display = "inline-block";
-
-  for (const key of Object.keys(panes)) frag.append(panes[key]);
-  results.replaceChildren(frag);
-}
-
-function fillPane(pane, json, title, emptyText) {
-  pane.textContent = "";
-  const answers = json && Array.isArray(json.Answer) ? json.Answer : [];
-  const status = json && typeof json.Status === "number" ? Number(json.Status) : null;
-  if (status !== null && status !== 0) {
-    pane.append(el("div", `banner ${status === 3 ? "warn" : "err"}`, `${title} 查询失败 (${statusName(status)})`));
-  } else if (answers.length === 0) {
-    pane.append(el("p", "placeholder", emptyText));
-  } else {
-    pane.append(renderTable(`${title} 记录`, answers));
-  }
-}
-
-function fillPaneNs(pane, json) {
-  pane.textContent = "";
-  const answers = [];
-  if (json) {
-    for (const key of ["Answer", "Authority"]) {
-      if (Array.isArray(json[key])) answers.push(...json[key]);
-    }
-  }
-  const nsSoa = answers.filter((r) => r.type === 2 || r.type === 6);
-  const status = json && typeof json.Status === "number" ? Number(json.Status) : null;
-  if (status !== null && status !== 0 && nsSoa.length === 0) {
-    pane.append(el("div", `banner ${status === 3 ? "warn" : "err"}`, `NS 查询失败 (${statusName(status)})`));
-  } else if (nsSoa.length === 0) {
-    pane.append(el("p", "placeholder", "未找到 NS/SOA 记录（或查询失败）"));
-  } else {
-    pane.append(renderTable("NS / SOA 记录", nsSoa));
-  }
-}
-
-// ── Get JSON: open the raw dns-json response in a new tab ───────────────
+// ── Get Json：新标签打开所选服务的原始 dns-json ─────────────────────────
 if (getJsonBtn) {
-  getJsonBtn.addEventListener("click", () => {
-    const name = domainInput.value.trim();
-    if (!name) {
-      alert("请输入要查询的域名。");
-      domainInput.focus();
-      return;
+  getJsonBtn.addEventListener("click", function () {
+    const domain = domainInput.value.trim();
+    if (!domain) { alert("请输入需要解析的域名"); return; }
+    const sel = dohSelect.value;
+    let doh;
+    let isCurrent = false;
+    if (sel === "current") { doh = currentDohUrl; isCurrent = true; }
+    else if (sel === "custom") {
+      doh = customDoh.value.trim();
+      if (!doh) { alert("请输入自定义 DoH 地址"); return; }
+    } else doh = sel;
+    if (!/^https:\/\//i.test(doh)) { alert("DoH 地址必须是 https:// 开头"); return; }
+    const url = new URL(doh);
+    url.searchParams.set("name", domain);
+    if (isCurrent) {
+      const flags = flagPath(optFamily || { value: "" }, optEcs || { value: "" }, optEcsIp || { value: "" });
+      if (flags) url.pathname = url.pathname.replace(/\/?$/, "") + "/" + flags;
+      if (optDo && optDo.checked) url.searchParams.set("do", "1");
+      if (optCd && optCd.checked) url.searchParams.set("cd", "1");
     }
-    const provider = selectedProvider();
-    if (!provider.isCurrent && !/^https:\/\//i.test(provider.base)) {
-      alert("请选择有效的 DoH 服务，或在「自定义」中填写 https:// 开头的 dns-json 地址。");
-      return;
-    }
-    const type = (typeInput.value.trim() || "A").toUpperCase();
-    const params = new URLSearchParams({ name, type });
-    if (doCheckbox.checked) params.set("do", "1");
-    if (cdCheckbox.checked) params.set("cd", "1");
-    window.open(jsonQueryUrl(provider, params), "_blank", "noopener");
+    window.open(url.toString(), "_blank", "noopener");
   });
 }
 
-// ── Persistence: remember the last domain / provider / custom endpoint ──
-function savePrefs() {
+// ── 页面初始化 ──────────────────────────────────────────────────────────
+if (dohSelect) {
+  dohSelect.addEventListener("change", function () {
+    customDohContainer.style.display = this.value === "custom" ? "block" : "none";
+  });
+}
+if (clearBtn) {
+  clearBtn.addEventListener("click", function () {
+    domainInput.value = "";
+    domainInput.focus();
+  });
+}
+if (copyBtn) {
+  copyBtn.addEventListener("click", function () {
+    handleCopyClick(copyBtn, resultPre.textContent);
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
   try {
-    localStorage.setItem("lastDomain", domainInput.value);
-    localStorage.setItem("lastProvider", dohProvider.value);
-    localStorage.setItem("lastCustomDoh", customDoh.value);
+    const lastDomain = localStorage.getItem("lastDomain");
+    if (lastDomain) domainInput.value = lastDomain;
   } catch (e) { /* storage disabled */ }
-}
-
-try {
-  const lastDomain = localStorage.getItem("lastDomain");
-  if (lastDomain) domainInput.value = lastDomain;
-  const lastProvider = localStorage.getItem("lastProvider");
-  if (lastProvider && Array.from(dohProvider.options).some((o) => o.value === lastProvider)) {
-    dohProvider.value = lastProvider;
+  if (domainInput) {
+    domainInput.addEventListener("input", function () {
+      try { localStorage.setItem("lastDomain", this.value); } catch (e) { /* ignore */ }
+    });
   }
-  const lastCustomDoh = localStorage.getItem("lastCustomDoh");
-  if (lastCustomDoh) customDoh.value = lastCustomDoh;
-} catch (e) { /* storage disabled */ }
 
-toggleCustomDoh();
-domainInput.addEventListener("input", savePrefs);
-if (dohProvider) {
-  dohProvider.addEventListener("change", () => {
-    toggleCustomDoh();
-    savePrefs();
-  });
-}
-if (customDoh) customDoh.addEventListener("input", savePrefs);
+  if (currentDomain) currentDomain.textContent = currentHost;
+  if (dohUrlDisplay) {
+    dohUrlDisplay.addEventListener("click", function () {
+      handleCopyClick(dohUrlDisplay, currentProtocol + "//" + currentHost + "/dns-query-json");
+    });
+  }
+  const privatePath = document.getElementById("privateDohPath");
+  if (privatePath && privateDohPath) {
+    privatePath.textContent = currentProtocol + "//" + currentHost + privateDohPath;
+    privatePath.addEventListener("click", function () {
+      handleCopyClick(privatePath, privatePath.textContent);
+    });
+  }
+});
