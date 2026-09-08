@@ -399,9 +399,18 @@ if (getJsonBtn) {
 
 // ── 页面初始化 ──────────────────────────────────────────────────────────
 if (dohSelect) {
+  const advancedOptions = document.getElementById("advancedOptions");
+  // 高级选项（地址族/ECS/DO/CD）只对「当前站点」有意义：选其它 DoH 服务时隐藏。
+  function syncAdvancedOptions() {
+    if (advancedOptions) {
+      advancedOptions.style.display = dohSelect.value === "current" ? "" : "none";
+    }
+  }
   dohSelect.addEventListener("change", function () {
     customDohContainer.style.display = this.value === "custom" ? "block" : "none";
+    syncAdvancedOptions();
   });
+  syncAdvancedOptions();
 }
 if (clearBtn) {
   clearBtn.addEventListener("click", function () {

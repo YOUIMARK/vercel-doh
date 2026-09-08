@@ -123,7 +123,7 @@ export function homePage(config: DoHConfig) {
               <button type="button" class="btn btn-outline-secondary" id="clearBtn">清除</button>
             </div>
           </div>
-          <details class="advanced-options">
+          <details class="advanced-options" id="advancedOptions">
             <summary>高级选项（地址族 / ECS / DNSSEC，仅「当前站点」生效）</summary>
             <div class="adv-row">
               <label>地址族
