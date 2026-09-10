@@ -72,6 +72,9 @@ function parseJsonFlags(pathname: string): JsonFlags {
 
 export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
   return async (c: Context): Promise<Response> => {
+    if (c.req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
     if (c.req.method !== "GET") {
       return textError(405, "Method Not Allowed", corsHeaders());
     }
@@ -160,13 +163,17 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     headers.set("User-Agent", `vercel-doh/${config.appVersion}`);
 
     try {
-      const parsed = await fetchJsonWithFailover(config, upstreams, params, headers);
-      const cacheControl = jsonCacheControl(config, parsed, ecsSensitive);
+      const { data, providerIndex } = await fetchJsonWithFailover(config, upstreams, params, headers);
+      const cacheControl = jsonCacheControl(config, data, ecsSensitive);
       const out = new Headers(corsHeaders());
       out.set("Content-Type", "application/json");
       out.set("Cache-Control", cacheControl);
+      if (config.debugLogging) {
+        out.set("X-DOH-upstream", String(providerIndex));
+        out.set("X-DOH-cache", cacheControl);
+      }
       debugLog(`dns-json ok (family=${family} ecs=${ecsSensitive} cache=${cacheControl})`);
-      return new Response(JSON.stringify(parsed), { status: 200, headers: out });
+      return new Response(JSON.stringify(data), { status: 200, headers: out });
     } catch (err) {
       if (err instanceof UpstreamError) {
         debugLog(`dns-json all upstreams failed: ${err.message}`);
@@ -186,9 +193,16 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
  * back to the minimum Authority TTL when the SOA cannot be parsed; anything
  * else or missing TTL information → no-store. ECS-sensitive responses are
  * never shared. No `stale-while-revalidate`: a DNS TTL is a hard expiry.
+ * `config.ttlJitter` (0..1) jitters the s-maxage DOWN only (min 1s) to
+ * spread CDN expiry; the optional `rng` makes it deterministic in tests.
  * Exported for unit tests.
  */
-export function jsonCacheControl(config: DoHConfig, parsed: JsonResponse, ecsSensitive: boolean): string {
+export function jsonCacheControl(
+  config: DoHConfig,
+  parsed: JsonResponse,
+  ecsSensitive: boolean,
+  rng: () => number = Math.random,
+): string {
   if (ecsSensitive) return "no-store";
   const status = typeof parsed.Status === "number" ? parsed.Status : -1;
   if (status !== 0 && status !== 3) return "no-store";
@@ -201,7 +215,11 @@ export function jsonCacheControl(config: DoHConfig, parsed: JsonResponse, ecsSen
   if (ttl === null) return "no-store"; // no usable TTL (e.g. negative w/o SOA)
 
   const capped = Math.max(0, Math.min(ttl, config.cacheMaxAge));
-  return `public, s-maxage=${capped}`;
+  let effective = capped;
+  if (config.ttlJitter > 0 && effective > 1) {
+    effective = Math.max(1, Math.floor(effective * (1 - rng() * config.ttlJitter)));
+  }
+  return `public, s-maxage=${effective}`;
 }
 
 /**
@@ -245,22 +263,30 @@ function minTtlOf(records: unknown): number | null {
  * responses whose Content-Type is exactly application/dns-json or
  * application/json AND whose body parses as the dns-json schema are accepted;
  * anything else throws UpstreamError and fails over. Bounded by
- * config.maxBodyBytes like the dns-message path.
+ * config.maxBodyBytes like the dns-message path, and by the total wall-clock
+ * budget config.totalTimeoutMs (each attempt gets
+ * `min(UPSTREAM_TIMEOUT_MS, remaining)`).
  */
 async function fetchJsonWithFailover(
   config: DoHConfig,
   upstreams: string[],
   params: URLSearchParams,
   headers: Headers,
-): Promise<JsonResponse> {
+): Promise<{ data: JsonResponse; providerIndex: number }> {
   const attempts = Math.min(config.maxAttempts, upstreams.length);
+  const deadlineMs = Date.now() + config.totalTimeoutMs;
   let lastError: Error | null = null;
   for (let i = 0; i < attempts; i++) {
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0) break;
     const upstream = upstreams[i] as string;
     const target = new URL(upstream);
     target.search = params.toString();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+    const timer = setTimeout(
+      () => controller.abort(),
+      Math.max(50, Math.min(config.upstreamTimeoutMs, remaining)),
+    );
     const logUrl = redactUrl(target.href);
     try {
       const res = await fetch(target.href, {
@@ -290,7 +316,7 @@ async function fetchJsonWithFailover(
       if (!parsed) {
         throw new UpstreamError(`upstream ${logUrl} -> invalid dns-json response`);
       }
-      return parsed;
+      return { data: parsed, providerIndex: i };
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     } finally {

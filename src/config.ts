@@ -57,8 +57,22 @@ export interface DoHConfig {
   maxBodyBytes: number;
   /** Per-upstream fetch timeout. */
   upstreamTimeoutMs: number;
+  /**
+   * Total wall-clock budget (ms) for the WHOLE resolution — all failover
+   * attempts / the JSON failover loop. Every attempt is bounded by
+   * `min(upstreamTimeoutMs, remaining)`. 0 disables the cap (default off
+   * would unbounded worst-case latency, so the default is a real budget).
+   */
+  totalTimeoutMs: number;
   /** How many upstreams to try in sequential failover mode. */
   maxAttempts: number;
+  /**
+   * 0..1 jitter fraction applied DOWN to cacheable s-maxage values
+   * (thundering-herd protection on CDN expiry). 0 = off (exact TTL).
+   * The jitter NEVER raises freshness above the authoritative DNS TTL:
+   * `floor(capped × (1 − rand × jitter))`, minimum 1s.
+   */
+  ttlJitter: number;
 }
 
 export const DEFAULTS = {
@@ -82,6 +96,8 @@ export const DEFAULTS = {
   // request body cap and the upstream response cap.
   MAX_BODY_BYTES: MAX_DNS_MESSAGE_BYTES,
   UPSTREAM_TIMEOUT_MS: 3000,
+  TOTAL_TIMEOUT_MS: 10000,
+  TTL_JITTER: 0,
   MAX_ATTEMPTS: 3,
 } as const;
 
@@ -101,6 +117,19 @@ function parseNumber(value: string | undefined, fallback: number, min: number, m
   }
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || !Number.isFinite(n) || n < min || n > max) {
+    throw new Error(`invalid ${name}: "${value}" (expected ${min}..${max})`);
+  }
+  return n;
+}
+
+/** Strict decimal fraction ("0", "0.1", "0.25", "1") clamped to [min, max]. */
+function parseFraction(value: string | undefined, fallback: number, min: number, max: number, name: string): number {
+  if (value === undefined || value === "") return fallback;
+  if (!/^\d+(\.\d+)?$/.test(value)) {
+    throw new Error(`invalid ${name}: "${value}" (expected a number ${min}..${max})`);
+  }
+  const n = Number.parseFloat(value);
+  if (!Number.isFinite(n) || n < min || n > max) {
     throw new Error(`invalid ${name}: "${value}" (expected ${min}..${max})`);
   }
   return n;
@@ -211,7 +240,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
     appVersion: env.APP_VERSION || DEFAULTS.APP_VERSION,
     maxBodyBytes: DEFAULTS.MAX_BODY_BYTES,
     upstreamTimeoutMs: parseNumber(env.UPSTREAM_TIMEOUT_MS, DEFAULTS.UPSTREAM_TIMEOUT_MS, 500, 30000, "UPSTREAM_TIMEOUT_MS"),
+    totalTimeoutMs: parseNumber(env.TOTAL_TIMEOUT_MS, DEFAULTS.TOTAL_TIMEOUT_MS, 100, 60000, "TOTAL_TIMEOUT_MS"),
     maxAttempts: DEFAULTS.MAX_ATTEMPTS,
+    ttlJitter: parseFraction(env.TTL_JITTER, DEFAULTS.TTL_JITTER, 0, 1, "TTL_JITTER"),
   };
   setDebugLogging(config.debugLogging);
   return config;

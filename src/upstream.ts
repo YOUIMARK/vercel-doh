@@ -42,6 +42,8 @@ export interface UpstreamDnsResult {
   status: number;
   /** Full RCODE (incl. EDNS extended-rcode bits), from the validated response. */
   rcode: number;
+  /** Index of the winning upstream inside the `urls` array passed to queryUpstreams. */
+  providerIndex: number;
 }
 
 export interface UpstreamRequest {
@@ -95,10 +97,14 @@ export async function queryUpstreams(
   requestMessage: Uint8Array<ArrayBuffer>,
 ): Promise<UpstreamDnsResult> {
   if (urls.length === 0) throw new UpstreamError("no upstream configured");
+  // Absolute wall-clock deadline for the whole resolution (all attempts).
+  // Each attempt is bounded by min(UPSTREAM_TIMEOUT_MS, remaining) so the
+  // worst-case latency is TOTAL_TIMEOUT_MS, not attempts × timeout.
+  const deadlineMs = Date.now() + config.totalTimeoutMs;
   if (config.raceUpstreams && urls.length > 1) {
-    return raceUpstreams(config, urls, buildRequest, requestMessage);
+    return raceUpstreams(config, urls, buildRequest, requestMessage, deadlineMs);
   }
-  return sequentialFailover(config, urls, buildRequest, requestMessage);
+  return sequentialFailover(config, urls, buildRequest, requestMessage, deadlineMs);
 }
 
 /**
@@ -113,7 +119,7 @@ async function fetchValidated(
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   signal: AbortSignal,
   requestMessage: Uint8Array<ArrayBuffer>,
-): Promise<UpstreamDnsResult> {
+): Promise<Omit<UpstreamDnsResult, "providerIndex">> {
   const { url: fetchUrl, init } = buildRequest(url, signal);
   const logUrl = redactUrl(fetchUrl);
   const res = await fetch(fetchUrl, { ...init, redirect: "error" }); // SSRF: never follow redirects
@@ -146,6 +152,7 @@ async function sequentialFailover(
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   requestMessage: Uint8Array<ArrayBuffer>,
+  deadlineMs: number,
 ): Promise<UpstreamDnsResult> {
   const attempts = Math.min(config.maxAttempts, urls.length);
   const start = cursor % urls.length;
@@ -153,12 +160,15 @@ async function sequentialFailover(
 
   for (let i = 0; i < attempts; i++) {
     const url = urls[(start + i) % urls.length] as string;
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0) throw new UpstreamError("resolution deadline exceeded");
+    const attemptTimeout = Math.max(50, Math.min(config.upstreamTimeoutMs, remaining));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), attemptTimeout);
     try {
       const result = await fetchValidated(config, url, buildRequest, controller.signal, requestMessage);
       debugLog(`upstream ${url} -> ${result.status}`);
-      return result;
+      return { ...result, providerIndex: (start + i) % urls.length };
     } catch (err) {
       debugLog(`upstream ${url} failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -173,16 +183,21 @@ async function raceUpstreams(
   urls: string[],
   buildRequest: (url: string, signal: AbortSignal) => UpstreamRequest,
   requestMessage: Uint8Array<ArrayBuffer>,
+  deadlineMs: number,
 ): Promise<UpstreamDnsResult> {
+  // All attempts start together; the shared timer is bounded by the total
+  // deadline as well (min of per-upstream timeout and remaining budget).
+  const remaining = Math.max(50, deadlineMs - Date.now());
+  const raceTimeout = Math.min(config.upstreamTimeoutMs, remaining);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+  const timer = setTimeout(() => controller.abort(), raceTimeout);
   try {
     // Body is read (and validated) inside each attempt, so aborting the losers
     // after the winner resolves can never abort an unread winner body.
-    const attempts = urls.map(async (url) => {
+    const attempts = urls.map(async (url, i) => {
       const result = await fetchValidated(config, url, buildRequest, controller.signal, requestMessage);
       debugLog(`race: ${url} -> ${result.status}`);
-      return result;
+      return { ...result, providerIndex: i };
     });
     return await Promise.any(attempts);
   } catch (err) {

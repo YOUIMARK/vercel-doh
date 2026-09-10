@@ -31,9 +31,16 @@ export interface CacheControlInput {
   /** RFC 2308 negative TTL from the SOA record (NXDOMAIN/NODATA). */
   negativeTtl: number | null;
   cacheMaxAge: number;
+  /** 0..1 jitter fraction applied DOWN to the s-maxage (default 0 = off). */
+  ttlJitter?: number;
 }
 
-export function buildCacheControl(input: CacheControlInput): string {
+/**
+ * Builds the Cache-Control value. Optional `rng` (default Math.random) makes
+ * the TTL jitter deterministic in tests: with rng()=0 the value stays at the
+ * exact TTL, with rng()=1 it is reduced by the full jitter fraction.
+ */
+export function buildCacheControl(input: CacheControlInput, rng: () => number = Math.random): string {
   if (input.method === "POST" || input.ecsSensitive || !input.validResponse) return "no-store";
 
   // Only NOERROR (possibly NODATA) and NXDOMAIN are cacheable.
@@ -50,5 +57,14 @@ export function buildCacheControl(input: CacheControlInput): string {
   if (ttl === null) return "no-store";
 
   const capped = Math.max(0, Math.min(ttl, input.cacheMaxAge));
-  return `public, s-maxage=${capped}`;
+
+  // Thundering-herd protection: jitter the shared-cache TTL DOWN only, so
+  // freshness can never exceed the authoritative DNS TTL (RFC 1035 hard
+  // expiry). A floor of 1s keeps the entry at least briefly cacheable.
+  const jitter = input.ttlJitter ?? 0;
+  let effective = capped;
+  if (jitter > 0 && effective > 1) {
+    effective = Math.max(1, Math.floor(effective * (1 - rng() * jitter)));
+  }
+  return `public, s-maxage=${effective}`;
 }

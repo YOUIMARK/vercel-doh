@@ -46,8 +46,10 @@ vercel deploy --prod
 | `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 随机块长填充(128/256/512 随机选块对齐,防流量分析;响应无 OPT 时自动追加) |
 | `RACE_UPSTREAMS` | `false` | `true` = 并发竞速(最快者胜,牺牲隐私) |
 | `UPSTREAM_TIMEOUT_MS` | `3000` | 单上游超时 |
+| `TOTAL_TIMEOUT_MS` | `10000` | 总墙钟预算(100–60000): 约束整个解析(所有 failover 尝试 / JSON 上游循环),每次尝试取 `min(单上游超时, 剩余)`;预算耗尽即放弃 → SERVFAIL |
+| `TTL_JITTER` | `0` | 缓存 TTL 抖动(0–1 小数,默认 0 = 关): `s-maxage` **只降不升**(min 1s),防 CDN 到期雪崩;绝不抬过权威 TTL |
 | `DOMAIN_MAPPINGS` | `{}` | 路径映射,如 `{"google":{"targetDomain":"dns.google"}}` |
-| `DEBUG_LOGGING` | `false` | 排障时开,不打印查询内容 |
+| `DEBUG_LOGGING` | `false` | 排障时开: 调试日志(不打印查询内容)+ `X-DOH-upstream`/`X-DOH-rcode`/`X-DOH-cache` 诊断响应头 |
 
 ### 4. 部署后验证
 

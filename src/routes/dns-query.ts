@@ -320,12 +320,20 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
         minAnswerTtl: minAnswerTtl(upstreamBody),
         negativeTtl: soaNegativeTtl(upstreamBody),
         cacheMaxAge: config.cacheMaxAge,
+        ttlJitter: config.ttlJitter,
       });
 
       const headers = new Headers(corsHeaders());
       headers.set("Content-Type", DNS_MESSAGE);
       headers.set("Cache-Control", cacheControl);
       headers.set("Content-Length", String(finalBody.length));
+      if (config.debugLogging) {
+        // Diagnostic headers (opt-in via DEBUG_LOGGING): winning upstream
+        // index within the attempted pool, full RCODE, cache policy.
+        headers.set("X-DOH-upstream", String(result.providerIndex));
+        headers.set("X-DOH-rcode", String(rcode));
+        headers.set("X-DOH-cache", cacheControl);
+      }
       debugLog(`dns-query ${method} rcode=${rcode} cache=${cacheControl}`);
       return new Response(finalBody, { status: 200, headers });
     } catch (err) {

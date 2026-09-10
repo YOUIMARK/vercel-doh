@@ -20,7 +20,9 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   - 默认只把查询发给 **1 个**上游(轮询),失败才顺序转移,**绝不并发广播**
   - 默认**不附加 ECS**;上游出站头为 **allowlist**(Authorization/Cookie/XFF 等一律不外发)
   - ECS `/0`(客户端声明不披露地址)被尊重,绝不注入真实子网
-- **健壮**: 单上游 3s 超时;上游仅接受 **2xx + 精确 `application/dns-message` + 结构合法 + 响应回显请求 ID/Question** 的应答,
+- **健壮**: 单上游 3s 超时 + **总解析预算 `TOTAL_TIMEOUT_MS`(默认 10s,每次尝试取
+  `min(单上游超时, 剩余)`,预算耗尽即放弃 → SERVFAIL)**;上游仅接受 **2xx + 精确
+  `application/dns-message` + 结构合法 + 响应回显请求 ID/Question** 的应答,
   且响应体有 65535 字节上限(RFC 8484 最大报文长度),否则故障转移(非 2xx body 绝不当作 DNS 应答);`redirect: "error"` 防 SSRF;
   全部失败返回合法的 SERVFAIL dns-message(200)
 - **TTL 感知缓存**: 正向按 Answer 最小 TTL;NXDOMAIN/NODATA 按 RFC 2308
@@ -28,7 +30,8 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   SERVFAIL/REFUSED/其它 RCODE(含 EDNS extended,如 BADVERS=16)一律 `no-store`;
   POST / 含 ECS(请求或响应)一律 `no-store`;
   **刻意不使用 `stale-while-revalidate`**: DNS 记录的 TTL 是硬过期语义(RFC 1035),
-  CDN 一旦越过 s-maxage 就必须回源重取,绝不出 stale 兜底延长记录寿命
+  CDN 一旦越过 s-maxage 就必须回源重取,绝不出 stale 兜底延长记录寿命;
+  可选 `TTL_JITTER`(默认关)把 s-maxage **只降不升**地抖动,防 CDN 到期雪崩
 - **ECS 支持(默认关)**: `/dns-query/auto_ecs` 强制附加、`/dns-query/no_ecs`
   强制禁用(**并剥离客户端已带的 ECS**,而非仅不注入);客户端 IP 取可信头链
   (`x-vercel-forwarded-for` → `x-real-ip` → XFF 最右段),过滤私网/保留地址,
@@ -113,15 +116,17 @@ curl -X POST --data-binary @query.bin \
 | `CACHE_MAX_AGE` | `300` | GET 缓存 `s-maxage` 上限(秒) |
 | `RACE_UPSTREAMS` | `false` | `true` 时并发竞速所有上游(最快者胜,牺牲隐私换延迟) |
 | `UPSTREAM_TIMEOUT_MS` | `3000` | 单上游超时(500–30000) |
+| `TOTAL_TIMEOUT_MS` | `10000` | **总墙钟预算**(100–60000): 约束整个解析(所有 failover 尝试 / JSON 上游循环),每次尝试取 `min(单上游超时, 剩余)`;预算耗尽即放弃 → SERVFAIL。`/dns-query-proxy` 除外(保持 CF-Workers-DoH 原版 fetch 语义,无人工超时) |
+| `TTL_JITTER` | `0` | 缓存 TTL 抖动(0–1 小数,默认 0 = 关): 把 `s-maxage` **只降不升**(`max(1, floor(权威TTL × (1−rand×jitter)))`),防 CDN 到期雪崩;绝不把新鲜度抬过权威 TTL |
 | `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 响应填充(**Random-Block-Length**: 每次随机选 128/256/512 字节块对齐,防流量分析;响应无 OPT RR 时自动追加) |
 | `DOMAIN_MAPPINGS` | `{}` | 路径映射 JSON,如 `{"google":{"targetDomain":"dns.google"}}` |
-| `DEBUG_LOGGING` | `false` | 输出调试日志(注意: 不打印查询内容) |
+| `DEBUG_LOGGING` | `false` | 调试模式: 输出调试日志(不打印查询内容)+ dns-message 路径附 `X-DOH-upstream`/`X-DOH-rcode`/`X-DOH-cache`、dns-json 路径附 `X-DOH-upstream`/`X-DOH-cache` 诊断响应头 |
 | `APP_VERSION` | `1.0.0` | 信息页展示的版本号 |
 
 ## 测试
 
 ```bash
-npm test          # vitest 全量(273 个用例)
+npm test          # vitest 全量(293 个用例)
 npx tsc --noEmit  # 严格类型检查
 npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展名会报 TS2835)
 ```
@@ -147,7 +152,7 @@ npm run typecheck:node  # NodeNext 模式校验部署产物 ESM 导入(无扩展
                   /health, /)
   → 校验(方法/Accept/Content-Type/体积(增量流上限)/QR/OPCODE/QDCOUNT/ECS 严格校验)
   → [ECS 剥离|注入] → 上游选择(轮询 → 顺序故障转移,或竞速)
-  → fetch(3s 超时 + 响应校验(结构/回显/EDNS-ECS 信任边界)/上限)
+  → fetch(min(单上游超时, 剩余预算) + 响应校验(结构/回显/EDNS-ECS 信任边界)/上限)
   → 解析应答 TTL + extended RCODE → Cache-Control(无 serve-stale) → 响应
 ```
 
