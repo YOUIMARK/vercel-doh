@@ -111,7 +111,11 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       // regardless of the Accept header the tool sends.
       if (c.req.query("name") || wantsJson) {
         const flags = parsePathFlags(c.req.path, config.dohPath);
-        if (flags.provider === INVALID_PATH) {
+        if (flags.provider !== null) {
+          // Unknown segments (and DOMAIN_MAPPINGS providers, which are
+          // wire-only) have no meaning on the JSON dispatch — reject like
+          // the old dedicated -json endpoint did. ecs-<bad-ip> lands in
+          // provider as INVALID_PATH and is rejected here too.
           return textError(404, "Unknown path", corsHeaders());
         }
         return handleJsonQuery(config, {
@@ -346,7 +350,7 @@ function infoText(config: DoHConfig): Response {
 <li><code>${base}/v4</code> — 仅用 IPv4 连接上游; <code>${base}/v6</code> — 仅用 IPv6</li>
 <li><code>${base}/ecs</code> — 强制附加 EDNS Client Subnet; <code>${base}/no-ecs</code> — 强制禁用</li>
 <li><code>${base}/{provider}</code> — 按 <code>DOMAIN_MAPPINGS</code> 路由指定上游(可与上面的 flag 组合,如 <code>${base}/v4/ecs</code>)</li>
-<li><code>${base}-json</code> — dns-json API(浏览器查询工具,路径跟随 DOH_PATH,默认 /dns-query-json)</li>
+<li><code>${base}?name=...</code> — dns-json API(浏览器查询工具,与 DoH 同路径)</li>
 <li><code>/health</code> — 健康检查</li>
 </ul>
 <p>上游: 已配置(隐私考虑,不在公开页面展示具体地址)</p>

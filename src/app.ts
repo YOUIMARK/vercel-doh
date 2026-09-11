@@ -4,7 +4,6 @@
 import { Hono } from "hono";
 import { loadConfig, type DoHConfig } from "./config.js";
 import { handleDnsQuery } from "./routes/dns-query.js";
-import { handleJsonQuery } from "./routes/json.js";
 import { handleDohProxy } from "./routes/proxy.js";
 import { homePage, health } from "./routes/home.js";
 
@@ -21,16 +20,12 @@ export function createApp(config: DoHConfig = loadConfig()): Hono {
   // Path suffixes after the base are parsed as flags/provider:
   //   {base}, {base}/v4, {base}/v6, {base}/ecs, {base}/no-ecs,
   //   {base}/{provider}, and combinations like {base}/v4/ecs.
-  app.all(base, handleDnsQuery(config, "default"));
+  // The dns-json API for the web tool lives on the SAME base path: a GET
+  // with ?name= (and no ?dns=) on {base} or {base}/{flags} is dispatched to
+  // handleJsonQuery inside the DoH handler — one path serves both protocols
+  // (dns.google/resolve style). No separate -json endpoint exists.
+  app.all(`${base}`, handleDnsQuery(config, "default"));
   app.all(`${base}/*`, handleDnsQuery(config, "default"));
-
-  // dns-json API for the web tool. The path DERIVES from DOH_PATH
-  // (`{dohPath}-json`, default /dns-query-json) so a custom obfuscated path
-  // moves the JSON tool with it — the fixed /dns-query-json is NOT registered
-  // when DOH_PATH is customized (same 404 semantics as the wire endpoints).
-  // Flags via suffix, e.g. /dns-query-json/v4/ecs.
-  app.all(`${base}-json`, handleJsonQuery(config));
-  app.all(`${base}-json/*`, handleJsonQuery(config));
 
   // Server-side query proxy for third-party DoH providers selected in the
   // web tool (CF-Workers-DoH behavior: the server queries the provider so

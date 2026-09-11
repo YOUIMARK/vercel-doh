@@ -1,21 +1,18 @@
-// Google-style dns-json API (for the browser query tool).
+// Google-style dns-json API (for the browser query tool), served ON the DoH
+// base path: the dns-query dispatcher routes GET ?name= (and no ?dns=) here,
+// dns.google/resolve style. One path serves both protocols; URL flags come
+// from the shared base-path suffixes (parsed by the dispatcher, passed in as
+// baseFlags): {base}/v4, {base}/v6, {base}/ecs, {base}/no-ecs, {base}/ecs-<ip>
+// (combinable, e.g. {base}/v4/ecs-8.8.8.8).
+//
 // Same trust boundary as the dns-message path: only 2xx JSON responses with
 // the right Content-Type that actually parse as the dns-json schema are
 // accepted; malformed bodies fail over sequentially.
-//
-// The endpoint path derives from DOH_PATH (`{dohPath}-json`, default
-// /dns-query-json — see app.ts). URL flags (path suffixes, URL overrides env):
-//   {base}-json/v4        → force type=A (answer family)
-//   {base}-json/v6        → force type=AAAA
-//   {base}-json/ecs       → inject edns_client_subnet from the client IP
-//   {base}-json/ecs-<ip>  → inject edns_client_subnet from a fixed IP
-//   {base}-json/no-ecs    → strip any edns_client_subnet (privacy)
-//   combinable: {base}-json/v4/ecs-8.8.8.8
 
 import type { Context } from "hono";
 import type { DoHConfig, Family } from "../config.js";
 import { corsHeaders, textError } from "../errors.js";
-import { acceptsMediaType, parseMediaType } from "../media.js";
+import { parseMediaType } from "../media.js";
 import { parseClientIp } from "../dns/ecs.js";
 import { formatEcsPrefix, parseCidr, parseIp } from "../dns/ip.js";
 import { debugLog } from "../log.js";
@@ -25,7 +22,6 @@ import { ALLOWED_TYPES } from "./proxy.js";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
-const INVALID = "__invalid__";
 /** RFC 1035 §2.3.4: a domain name is at most 253 characters of text. */
 const MAX_DOMAIN_TEXT = 253;
 /** Canonical boolean forms accepted for the cd/do dns-json flags. */
@@ -49,28 +45,6 @@ interface JsonFlags {
   ecsOverrideIp: string | null;
 }
 
-function parseJsonFlags(pathname: string, jsonBase: string): JsonFlags {
-  if (!pathname.startsWith(`${jsonBase}/`)) return { family: null, ecs: null, ecsOverrideIp: null };
-  const segments = pathname.slice(jsonBase.length + 1).split("/").filter((s) => s.length > 0);
-  const flags: JsonFlags = { family: null, ecs: null, ecsOverrideIp: null };
-  for (const segment of segments) {
-    if (segment === "v4") flags.family = "v4";
-    else if (segment === "v6") flags.family = "v6";
-    else if (segment === "ecs" || segment === "auto_ecs") flags.ecs = true;
-    else if (segment === "no-ecs" || segment === "no_ecs") flags.ecs = false;
-    else if (segment.startsWith("ecs-")) {
-      const ip = segment.slice(4);
-      if (!parseIp(ip)) {
-        flags.family = INVALID as Family;
-      } else {
-        flags.ecs = true;
-        flags.ecsOverrideIp = ip;
-      }
-    } else flags.family = INVALID as Family;
-  }
-  return flags;
-}
-
 export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
   return async (c: Context): Promise<Response> => {
     if (c.req.method === "OPTIONS") {
@@ -79,28 +53,14 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     if (c.req.method !== "GET") {
       return textError(405, "Method Not Allowed", corsHeaders());
     }
-    const flags = parseJsonFlags(c.req.path, `${config.dohPath}-json`);
-    if (flags.family === (INVALID as Family)) {
-      return textError(404, "Unknown path", corsHeaders());
-    }
-    // Base-path flags (e.g. /youimark/v6/ecs dispatched from the DoH base)
-    // apply when no {dohPath}-json/{flag} suffix is present.
-    const family = flags.family ?? baseFlags?.family ?? config.upstreamFamily;
-    const ecsFlag = flags.ecs ?? baseFlags?.ecs ?? null;
-    const ecsOverrideIp = flags.ecsOverrideIp ?? baseFlags?.ecsOverrideIp ?? config.ecsOverrideIp;
-
-    const accept = c.req.header("accept") ?? "";
-    // Accept is only enforced when there is no `name` param: a request that
-    // carries `name` IS a JSON query regardless of what Accept third-party
-    // tools / browsers happen to send (RFC 8484 says SHOULD, not MUST).
-    const wantsJson =
-      acceptsMediaType(accept, JSON_MIME) ||
-      acceptsMediaType(accept, "application/json") ||
-      c.req.query("ct") === JSON_MIME;
+    // URL flags come from the shared DoH base-path suffixes (parsed by the
+    // dns-query dispatcher); env defaults apply when no flag is present.
+    const family = baseFlags?.family ?? config.upstreamFamily;
+    const ecsFlag = baseFlags?.ecs ?? null;
+    const ecsOverrideIp = baseFlags?.ecsOverrideIp ?? config.ecsOverrideIp;
 
     const name = c.req.query("name");
     if (!name) {
-      if (!wantsJson) return textError(406, "Not Acceptable: application/dns-json required", corsHeaders());
       return textError(400, "Missing name parameter", corsHeaders());
     }
 

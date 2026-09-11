@@ -27,13 +27,13 @@ export function health() {
 export function homePage(config: DoHConfig) {
   return (): Response => {
     const dohEndpoint = config.dohPath;
-    // The JSON tool API path derives from DOH_PATH ({dohPath}-json) and the
-    // frontend ALWAYS needs it for "当前站点" queries, so it is injected
-    // unconditionally. Note: with a custom DOH_PATH this necessarily makes
-    // the obfuscated stem visible on the public tool page — inherent to
-    // keeping the web tool on the same path scheme. The raw DoH wire
+    // The JSON tool API lives ON the DoH base path (GET ?name= → JSON), so
+    // the frontend always needs the base path for "当前站点" queries — it is
+    // injected unconditionally as window.JSON_ENDPOINT. Note: with a custom
+    // DOH_PATH this makes the obfuscated path visible on the public tool
+    // page — inherent to keeping the web tool usable. The client-config
     // endpoint is additionally revealed only when SHOW_DOH_ENDPOINT=true.
-    const jsonEndpoint = `${config.dohPath}-json`;
+    const jsonEndpoint = config.dohPath;
     const endpointScript =
       `<script>window.JSON_ENDPOINT=${JSON.stringify(jsonEndpoint)};</script>` +
       (config.showDohEndpoint
