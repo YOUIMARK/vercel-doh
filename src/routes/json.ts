@@ -18,6 +18,7 @@ import { acceptsMediaType, parseMediaType } from "../media.js";
 import { parseClientIp } from "../dns/ecs.js";
 import { formatEcsPrefix, parseCidr, parseIp } from "../dns/ip.js";
 import { debugLog } from "../log.js";
+import { discardBody, readStreamBounded } from "../read-body.js";
 import { redactUrl, UpstreamError } from "../upstream.js";
 import { ALLOWED_TYPES } from "./proxy.js";
 
@@ -189,13 +190,13 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
  * TTL-aware Cache-Control for dns-json responses, mirroring the dns-message
  * path: Status 0 with answers → min Answer TTL; NXDOMAIN/NODATA → RFC 2308
  * negative TTL `min(SOA TTL, SOA.MINIMUM)` derived from the SOA record's
- * `data` string (MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM); falling
- * back to the minimum Authority TTL when the SOA cannot be parsed; anything
- * else or missing TTL information → no-store. ECS-sensitive responses are
- * never shared. No `stale-while-revalidate`: a DNS TTL is a hard expiry.
- * `config.ttlJitter` (0..1) jitters the s-maxage DOWN only (min 1s) to
- * spread CDN expiry; the optional `rng` makes it deterministic in tests.
- * Exported for unit tests.
+ * `data` string (MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM); anything
+ * else or a negative answer WITHOUT a parseable SOA → no-store (RFC 2308 §5:
+ * a negative response without SOA must not be cached — same rule as the
+ * dns-message path). ECS-sensitive responses are never shared. No
+ * `stale-while-revalidate`: a DNS TTL is a hard expiry. `config.ttlJitter`
+ * (0..1) jitters the s-maxage DOWN only (min 1s) to spread CDN expiry; the
+ * optional `rng` makes it deterministic in tests. Exported for unit tests.
  */
 export function jsonCacheControl(
   config: DoHConfig,
@@ -208,7 +209,7 @@ export function jsonCacheControl(
   if (status !== 0 && status !== 3) return "no-store";
 
   const answerTtl = minTtlOf(parsed.Answer);
-  const negativeTtl = soaJsonNegativeTtl(parsed.Authority) ?? minTtlOf(parsed.Authority);
+  const negativeTtl = soaJsonNegativeTtl(parsed.Authority); // RFC 2308 only — no authority-TTL fallback
   let ttl: number | null = null;
   if (status === 0 && answerTtl !== null) ttl = answerTtl;
   else if (negativeTtl !== null) ttl = negativeTtl;
@@ -295,22 +296,29 @@ async function fetchJsonWithFailover(
         signal: controller.signal,
         redirect: "error", // SSRF: never follow redirects
       });
-      if (!res.ok) throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
+      if (!res.ok) {
+        await discardBody(res);
+        throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
+      }
       const contentType = res.headers.get("content-type") ?? "";
       const essence = parseMediaType(contentType);
       if (essence !== JSON_MIME && essence !== "application/json") {
+        await discardBody(res);
         throw new UpstreamError(`upstream ${logUrl} -> unexpected content-type ${contentType}`);
       }
       const contentLength = res.headers.get("content-length");
       if (contentLength !== null) {
         const n = Number.parseInt(contentLength, 10);
         if (!Number.isNaN(n) && n > config.maxBodyBytes) {
+          await discardBody(res);
           throw new UpstreamError(`upstream ${logUrl} -> response too large (${n} bytes)`);
         }
       }
-      const body = new Uint8Array(await res.arrayBuffer());
-      if (body.length > config.maxBodyBytes) {
-        throw new UpstreamError(`upstream ${logUrl} -> response too large (${body.length} bytes)`);
+      // Incremental cap: a chunked / lying upstream must never be fully
+      // buffered before the size limit applies.
+      const body = await readStreamBounded(res.body, config.maxBodyBytes);
+      if (body === null) {
+        throw new UpstreamError(`upstream ${logUrl} -> response too large (> ${config.maxBodyBytes} bytes streamed)`);
       }
       const parsed = validateJsonResponse(body);
       if (!parsed) {

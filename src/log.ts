@@ -9,7 +9,3 @@ export function setDebugLogging(enabled: boolean): void {
 export function debugLog(...args: unknown[]): void {
   if (debugEnabled) console.log("[doh]", ...args);
 }
-
-export function errorLog(...args: unknown[]): void {
-  console.error("[doh]", ...args);
-}

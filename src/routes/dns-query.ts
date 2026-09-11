@@ -9,6 +9,7 @@ import { acceptsMediaType, parseMediaType } from "../media.js";
 import { addOrMergeEcs, buildEcsOption, ecsStatus, parseClientIp, removeEcsOption } from "../dns/ecs.js";
 import { parseIp } from "../dns/ip.js";
 import { padResponse } from "../dns/padding.js";
+import { readStreamBounded } from "../read-body.js";
 import { minAnswerTtl, soaNegativeTtl } from "../dns/ttl.js";
 import { countOptRrs, decodeBase64Url, encodeBase64Url, parseHeader, parseSections, questionType, setQuestionType } from "../dns/wire.js";
 import { buildUpstreamHeaders, queryUpstreams, resolveProvider, UpstreamError } from "../upstream.js";
@@ -48,39 +49,13 @@ const ECS_FLAGS = new Map<string, EcsBehavior>([
 const EMPTY_FLAGS: PathFlags = { family: null, behavior: null, ecsOverrideIp: null, provider: null };
 
 /**
- * Reads the POST body with a hard INCREMENTAL cap: chunks are accumulated and
- * the read aborts (and the stream is cancelled) the moment the cap is
- * exceeded, so a chunked or unknown-length body can never be fully buffered
- * in memory first. Returns null when the body overruns the cap.
+ * Reads the POST body with a hard INCREMENTAL cap (see read-body.ts): the
+ * read aborts and the stream is cancelled the moment the cap is exceeded, so
+ * a chunked or unknown-length body can never be fully buffered first.
+ * Returns null when the body overruns the cap.
  */
 async function readBodyBounded(c: Context, maxBytes: number): Promise<Uint8Array<ArrayBuffer> | null> {
-  const stream = c.req.raw.body; // underlying Request stream (chunked-safe)
-  if (!stream) return new Uint8Array(0);
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value === undefined) continue;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {}); // tell the client to stop sending
-        return null;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, o);
-    o += chunk.byteLength;
-  }
-  return out;
+  return readStreamBounded(c.req.raw.body, maxBytes);
 }
 
 export function parsePathFlags(pathname: string, basePath: string): PathFlags {
@@ -172,6 +147,12 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       const contentType = c.req.header("content-type") ?? "";
       if (parseMediaType(contentType) !== DNS_MESSAGE) {
         return textError(415, "Unsupported Media Type: application/dns-message required", corsHeaders());
+      }
+      // Mirror the GET behavior (RFC 8484 content negotiation): an Accept that
+      // explicitly excludes application/dns-message (e.g. `;q=0`) must yield
+      // 406 instead of a dns-message body. Absent / `*/*` stays acceptable.
+      if (!acceptsMessage) {
+        return textError(406, "Not Acceptable: application/dns-message required", corsHeaders());
       }
       // Read the body incrementally and abort as soon as the cap is exceeded:
       // a chunked / unknown-length body must never be fully buffered first.

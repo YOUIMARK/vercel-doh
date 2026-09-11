@@ -84,6 +84,11 @@ export function ecsStatus(msg: Uint8Array, opts: EcsStatusOptions = {}): EcsStat
       }
       o += 4 + len;
     }
+    // RFC 6891 §6.1.2: OPT RDATA is a sequence of options that must exactly
+    // fill it. 1–3 trailing bytes (a truncated option header) are malformed,
+    // NOT "no ECS" — treating them as absent would let a query slip past the
+    // protocol gate and have ECS injected into a corrupt OPT.
+    if (o !== end) return "malformed";
   }
 
   if (sawEcs) return status ?? "malformed";
@@ -124,6 +129,7 @@ export function findEcs(msg: Uint8Array): EcsOption | null {
       }
       o += 4 + len;
     }
+    if (o !== end) return null; // truncated trailing option bytes (see ecsStatus)
   }
   return null;
 }

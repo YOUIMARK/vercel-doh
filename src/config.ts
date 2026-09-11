@@ -220,6 +220,20 @@ export function parseOptionalIp(value: string | undefined): string | null {
   return trimmed;
 }
 
+/**
+ * Validates APP_VERSION: it is interpolated into the upstream User-Agent
+ * header and the endpoint info page, so control characters would make every
+ * upstream request throw (undici rejects CR/LF in header values) or inject
+ * markup into HTML. Printable ASCII only, 1..64 chars; fails fast at boot.
+ */
+export function parseAppVersion(value: string | undefined): string {
+  const raw = value === undefined || value === "" ? DEFAULTS.APP_VERSION : value;
+  if (!/^[\x20-\x7e]{1,64}$/.test(raw)) {
+    throw new Error(`invalid APP_VERSION: ${JSON.stringify(raw)} (expected 1..64 printable ASCII characters)`);
+  }
+  return raw;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
   const config: DoHConfig = {
     upstreamUrls: parseUrlList(env.UPSTREAM_DOH_URLS, DEFAULTS.UPSTREAM_DOH_URLS),
@@ -237,7 +251,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
     forceResponsePadding: parseBool(env.FORCE_RESPONSE_PADDING, DEFAULTS.FORCE_RESPONSE_PADDING),
     domainMappings: parseDomainMappings(env.DOMAIN_MAPPINGS),
     debugLogging: parseBool(env.DEBUG_LOGGING, DEFAULTS.DEBUG_LOGGING),
-    appVersion: env.APP_VERSION || DEFAULTS.APP_VERSION,
+    appVersion: parseAppVersion(env.APP_VERSION),
     maxBodyBytes: DEFAULTS.MAX_BODY_BYTES,
     upstreamTimeoutMs: parseNumber(env.UPSTREAM_TIMEOUT_MS, DEFAULTS.UPSTREAM_TIMEOUT_MS, 500, 30000, "UPSTREAM_TIMEOUT_MS"),
     totalTimeoutMs: parseNumber(env.TOTAL_TIMEOUT_MS, DEFAULTS.TOTAL_TIMEOUT_MS, 100, 60000, "TOTAL_TIMEOUT_MS"),

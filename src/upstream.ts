@@ -13,6 +13,7 @@
 
 import type { DoHConfig } from "./config.js";
 import { parseMediaType } from "./media.js";
+import { discardBody, readStreamBounded } from "./read-body.js";
 import { validateDnsResponse } from "./dns/validate.js";
 import { debugLog } from "./log.js";
 
@@ -111,7 +112,8 @@ export async function queryUpstreams(
  * Performs one upstream request and returns a validated, fully-read response.
  * Rejects on: network error/timeout, redirect, non-2xx status, wrong
  * Content-Type, oversized body, or an invalid/mismatched DNS payload — all
- * treated as failures that trigger failover.
+ * treated as failures that trigger failover. Rejected responses are cancelled
+ * (not left unread) so the socket is released promptly.
  */
 async function fetchValidated(
   config: DoHConfig,
@@ -123,22 +125,29 @@ async function fetchValidated(
   const { url: fetchUrl, init } = buildRequest(url, signal);
   const logUrl = redactUrl(fetchUrl);
   const res = await fetch(fetchUrl, { ...init, redirect: "error" }); // SSRF: never follow redirects
-  if (!res.ok) throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
+  if (!res.ok) {
+    await discardBody(res);
+    throw new UpstreamError(`upstream ${logUrl} -> ${res.status}`);
+  }
   const contentType = res.headers.get("content-type") ?? "";
   if (parseMediaType(contentType) !== "application/dns-message") {
+    await discardBody(res);
     throw new UpstreamError(`upstream ${logUrl} -> unexpected content-type ${contentType}`);
   }
-  // Reject oversized responses up front (Content-Length) and after reading.
+  // Reject oversized responses up front (declared Content-Length) and then
+  // INCREMENTALLY while reading — a chunked / lying upstream must never be
+  // fully buffered before the cap applies.
   const contentLength = res.headers.get("content-length");
   if (contentLength !== null) {
     const n = Number.parseInt(contentLength, 10);
     if (!Number.isNaN(n) && n > config.maxBodyBytes) {
+      await discardBody(res);
       throw new UpstreamError(`upstream ${logUrl} -> response too large (${n} bytes)`);
     }
   }
-  const body = new Uint8Array(await res.arrayBuffer());
-  if (body.length > config.maxBodyBytes) {
-    throw new UpstreamError(`upstream ${logUrl} -> response too large (${body.length} bytes)`);
+  const body = await readStreamBounded(res.body, config.maxBodyBytes);
+  if (body === null) {
+    throw new UpstreamError(`upstream ${logUrl} -> response too large (> ${config.maxBodyBytes} bytes streamed)`);
   }
   const validated = validateDnsResponse(body, requestMessage);
   if (!validated) {

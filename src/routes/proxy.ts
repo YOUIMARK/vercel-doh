@@ -14,6 +14,7 @@
 import type { Context } from "hono";
 import type { DoHConfig } from "../config.js";
 import { corsHeaders, textError } from "../errors.js";
+import { readStreamBounded } from "../read-body.js";
 
 const JSON_MIME = "application/dns-json";
 
@@ -105,6 +106,9 @@ async function queryDnsJson(
   url.searchParams.set("name", domain);
   url.searchParams.set("type", type);
 
+  // NOTE: deliberately NOT bounded by TOTAL_TIMEOUT_MS (README: the proxy
+  // keeps CF-Workers-DoH's original per-fetch semantics — each Accept variant
+  // gets its own UPSTREAM_TIMEOUT_MS abort timer).
   let lastError: Error | null = null;
   for (const headers of ACCEPT_VARIANTS) {
     const controller = new AbortController();
@@ -116,16 +120,22 @@ async function queryDnsJson(
         redirect: "error", // SSRF guard: never follow redirects
       });
       if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        lastError = new Error(`DoH 服务器返回错误 (${res.status}): ${t.slice(0, 200)}`);
+        // Bounded read of the diagnostic snippet: the doh= URL is
+        // user-chosen, so the body can come from anywhere and must never be
+        // fully buffered (the cap aborts mid-stream; an overrun yields "").
+        const snippet = await readStreamBounded(res.body, config.maxBodyBytes);
+        const text = snippet === null ? "" : new TextDecoder().decode(snippet);
+        lastError = new Error(`DoH 服务器返回错误 (${res.status}): ${text.slice(0, 200)}`);
         continue;
       }
-      const text = await res.text();
-      if (text.length > config.maxBodyBytes) {
+      // Incremental cap: a chunked / lying upstream must never be fully
+      // buffered before the size limit applies.
+      const body = await readStreamBounded(res.body, config.maxBodyBytes);
+      if (body === null) {
         lastError = new Error("响应超过大小上限");
         continue;
       }
-      const parsed = JSON.parse(text) as unknown;
+      const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
         lastError = new Error("无法解析响应为 JSON");
         continue;
