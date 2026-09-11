@@ -24,10 +24,13 @@ export function createApp(config: DoHConfig = loadConfig()): Hono {
   app.all(base, handleDnsQuery(config, "default"));
   app.all(`${base}/*`, handleDnsQuery(config, "default"));
 
-  // dns-json API for the web tool (fixed public path; flags via suffix,
-  // e.g. /dns-query-json/v4/ecs).
-  app.all("/dns-query-json", handleJsonQuery(config));
-  app.all("/dns-query-json/*", handleJsonQuery(config));
+  // dns-json API for the web tool. The path DERIVES from DOH_PATH
+  // (`{dohPath}-json`, default /dns-query-json) so a custom obfuscated path
+  // moves the JSON tool with it — the fixed /dns-query-json is NOT registered
+  // when DOH_PATH is customized (same 404 semantics as the wire endpoints).
+  // Flags via suffix, e.g. /dns-query-json/v4/ecs.
+  app.all(`${base}-json`, handleJsonQuery(config));
+  app.all(`${base}-json/*`, handleJsonQuery(config));
 
   // Server-side query proxy for third-party DoH providers selected in the
   // web tool (CF-Workers-DoH behavior: the server queries the provider so

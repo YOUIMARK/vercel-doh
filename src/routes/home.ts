@@ -4,7 +4,8 @@
 // The page structure, classes and visual design are DIRECTLY BORROWED from
 // CF-Workers-DoH (cmliu, MIT) — Bootstrap 5.3 + its original CSS — and only
 // the data wiring is adapted to vercel-doh's backend:
-//   - queries go to our own /dns-query-json (current site); third-party
+//   - queries go to our own {DOH_PATH}-json API (injected as
+//     window.JSON_ENDPOINT; default /dns-query-json); third-party
 //     providers go through the server-side /dns-query-proxy endpoint
 //     (mirrors CF-Workers-DoH's ?doh= handler, no CORS wall, no client
 //     headers forwarded);
@@ -26,12 +27,18 @@ export function health() {
 export function homePage(config: DoHConfig) {
   return (): Response => {
     const dohEndpoint = config.dohPath;
-    // The DoH path is an obfuscation secret — the frontend only shows it when
-    // SHOW_DOH_ENDPOINT=true (default: hidden). The JSON tool API
-    // (/dns-query-json) is public by design.
-    const endpointScript = config.showDohEndpoint
-      ? `<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>`
-      : "";
+    // The JSON tool API path derives from DOH_PATH ({dohPath}-json) and the
+    // frontend ALWAYS needs it for "当前站点" queries, so it is injected
+    // unconditionally. Note: with a custom DOH_PATH this necessarily makes
+    // the obfuscated stem visible on the public tool page — inherent to
+    // keeping the web tool on the same path scheme. The raw DoH wire
+    // endpoint is additionally revealed only when SHOW_DOH_ENDPOINT=true.
+    const jsonEndpoint = `${config.dohPath}-json`;
+    const endpointScript =
+      `<script>window.JSON_ENDPOINT=${JSON.stringify(jsonEndpoint)};</script>` +
+      (config.showDohEndpoint
+        ? `<script>window.DOH_ENDPOINT=${JSON.stringify(dohEndpoint)};</script>`
+        : "");
     const endpointCard = config.showDohEndpoint
       ? `<div class="card">
       <div class="card-header">🛡 DoH 端点(配置到客户端)</div>

@@ -47,7 +47,8 @@ Subnet (ECS) 注入(绝不产生重复 OPT RR)、路径映射、隐私默认值�
   可组合且顺序任意,如 `/dns-query/v4/ecs-8.8.8.8`;URL 优先于环境变量
   (v4/v6 = **答案族**: 代理把查询类型重写为 A/AAAA,而非限制连接地址;
   ecs-<IP> 仅当 ECS 开启时生效,关闭(no-ecs)时该配置失效)
-- **dns-json API**: `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
+- **dns-json API**: 路径**跟随 `DOH_PATH`**(`{DOH_PATH}-json`,默认 `/dns-query-json`),
+  如 `/dns-query-json?name=...&type=A`(兼容 Google DoH JSON);
   **DoH 基路径同样支持 JSON 查询**(`/youimark?name=...` 即 dns.google/resolve 风格,
   无需特定 Accept);flag 后缀同样生效,如 `/dns-query-json/v4/ecs`
   (ecs = 代理用客户端 IP 掩码注入 `edns_client_subnet`;no-ecs 则剥离任何子网参数);
@@ -105,7 +106,7 @@ curl -X POST --data-binary @query.bin \
 |---|---|---|
 | `UPSTREAM_DOH_URLS` | `https://cloudflare-dns.com/dns-query` | 常规上游,逗号分隔(顺序转移) |
 | `UPSTREAM_FAMILY` | `auto` | 答案族: `auto`(默认,不重写)/ `v4`(强制只查 A)/ `v6`(强制只查 AAAA);可用 URL flag 覆盖 |
-| `DOH_PATH` | `/dns-query` | DoH 端点路径。改成随机路径(如 `/3f9a2b7c`)即路径混淆,标准路径自动 404 |
+| `DOH_PATH` | `/dns-query` | DoH 端点路径。改成随机路径(如 `/3f9a2b7c`)即路径混淆,标准路径自动 404;dns-json 工具 API 同步迁移为 `/{DOH_PATH}-json` |
 | `SHOW_DOH_ENDPOINT` | `false` | `true` 时前端显示 DoH 端点路径并生成客户端 URL(默认隐藏,防泄露混淆路径) |
 | `ECS_UPSTREAM_DOH_URLS` | `https://dns.google/dns-query` | 请求带 ECS 时使用的上游 |
 | `JSON_UPSTREAM_DOH_URLS` | `https://dns.google/resolve` | dns-json 上游 |

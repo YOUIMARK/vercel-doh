@@ -2,8 +2,8 @@
 // Directly adapted from CF-Workers-DoH's inline script (cmliu, MIT):
 // the query flow, tabs, copy and TTL formatting are borrowed; the data
 // wiring is changed to vercel-doh's backend:
-//   - "当前站点" queries our public /dns-query-json API (v4/v6/ECS/DO/CD
-//     flags come from the advanced options);
+//   - "当前站点" queries our public {DOH_PATH}-json API (path injected by
+//     the server as window.JSON_ENDPOINT, default /dns-query-json);
 //   - third-party providers go through the server-side /dns-query-proxy
 //     endpoint (mirrors CF-Workers-DoH's ?doh= handler — no CORS wall, and
 //     client headers are never forwarded to the provider);
@@ -16,8 +16,8 @@
 
 const currentHost = window.location.host;
 const currentProtocol = window.location.protocol;
-// 当前站点 = 本站公开的 dns-json 工具 API（固定路径，非私密 DoH 端点）。
-const currentDohUrl = currentProtocol + "//" + currentHost + "/dns-query-json";
+// 当前站点 = 本站 dns-json 工具 API(路径由服务端注入,跟随 DOH_PATH,默认 /dns-query-json)。
+const currentDohUrl = currentProtocol + "//" + currentHost + (window.JSON_ENDPOINT || "/dns-query-json");
 const privateDohPath = window.DOH_ENDPOINT || null;
 
 const dohSelect = document.getElementById("dohSelect");
@@ -306,7 +306,7 @@ async function resolveAll(doh, domain) {
   };
 }
 
-/** 单次 dns-json 查询：当前站点走 /dns-query-json，第三方走服务端代理。 */
+/** 单次 dns-json 查询：当前站点走 JSON_ENDPOINT（随 DOH_PATH），第三方走服务端代理。 */
 async function queryDns(doh, domain, type) {
   const url = new URL(doh);
   url.searchParams.set("name", domain);

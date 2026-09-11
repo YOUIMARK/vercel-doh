@@ -3,13 +3,14 @@
 // the right Content-Type that actually parse as the dns-json schema are
 // accepted; malformed bodies fail over sequentially.
 //
-// URL flags (path suffixes, URL overrides env):
-//   /dns-query-json/v4        → force type=A (answer family)
-//   /dns-query-json/v6        → force type=AAAA
-//   /dns-query-json/ecs       → inject edns_client_subnet from the client IP
-//   /dns-query-json/ecs-<ip>  → inject edns_client_subnet from a fixed IP
-//   /dns-query-json/no-ecs    → strip any edns_client_subnet (privacy)
-//   combinable: /dns-query-json/v4/ecs-8.8.8.8
+// The endpoint path derives from DOH_PATH (`{dohPath}-json`, default
+// /dns-query-json — see app.ts). URL flags (path suffixes, URL overrides env):
+//   {base}-json/v4        → force type=A (answer family)
+//   {base}-json/v6        → force type=AAAA
+//   {base}-json/ecs       → inject edns_client_subnet from the client IP
+//   {base}-json/ecs-<ip>  → inject edns_client_subnet from a fixed IP
+//   {base}-json/no-ecs    → strip any edns_client_subnet (privacy)
+//   combinable: {base}-json/v4/ecs-8.8.8.8
 
 import type { Context } from "hono";
 import type { DoHConfig, Family } from "../config.js";
@@ -24,7 +25,6 @@ import { ALLOWED_TYPES } from "./proxy.js";
 
 const JSON_PARAMS = ["name", "type", "cd", "do", "edns_client_subnet"] as const;
 const JSON_MIME = "application/dns-json";
-const JSON_BASE = "/dns-query-json";
 const INVALID = "__invalid__";
 /** RFC 1035 §2.3.4: a domain name is at most 253 characters of text. */
 const MAX_DOMAIN_TEXT = 253;
@@ -49,9 +49,9 @@ interface JsonFlags {
   ecsOverrideIp: string | null;
 }
 
-function parseJsonFlags(pathname: string): JsonFlags {
-  if (!pathname.startsWith(`${JSON_BASE}/`)) return { family: null, ecs: null, ecsOverrideIp: null };
-  const segments = pathname.slice(JSON_BASE.length + 1).split("/").filter((s) => s.length > 0);
+function parseJsonFlags(pathname: string, jsonBase: string): JsonFlags {
+  if (!pathname.startsWith(`${jsonBase}/`)) return { family: null, ecs: null, ecsOverrideIp: null };
+  const segments = pathname.slice(jsonBase.length + 1).split("/").filter((s) => s.length > 0);
   const flags: JsonFlags = { family: null, ecs: null, ecsOverrideIp: null };
   for (const segment of segments) {
     if (segment === "v4") flags.family = "v4";
@@ -79,12 +79,12 @@ export function handleJsonQuery(config: DoHConfig, baseFlags?: JsonFlags) {
     if (c.req.method !== "GET") {
       return textError(405, "Method Not Allowed", corsHeaders());
     }
-    const flags = parseJsonFlags(c.req.path);
+    const flags = parseJsonFlags(c.req.path, `${config.dohPath}-json`);
     if (flags.family === (INVALID as Family)) {
       return textError(404, "Unknown path", corsHeaders());
     }
     // Base-path flags (e.g. /youimark/v6/ecs dispatched from the DoH base)
-    // apply when no /dns-query-json/{flag} suffix is present.
+    // apply when no {dohPath}-json/{flag} suffix is present.
     const family = flags.family ?? baseFlags?.family ?? config.upstreamFamily;
     const ecsFlag = flags.ecs ?? baseFlags?.ecs ?? null;
     const ecsOverrideIp = flags.ecsOverrideIp ?? baseFlags?.ecsOverrideIp ?? config.ecsOverrideIp;
