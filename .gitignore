@@ -4,6 +4,7 @@ dist/
 *.log
 .DS_Store
 .env
+.env.*
 .env.local
 # 测试套件仅本地保留(不上仓库);fresh clone 后 npm test 不可用
 test/

@@ -7,6 +7,9 @@
 //
 // Safety notes (kept from the original behavior, tightened where free):
 //  - the proxied URL must be https: (cleartext http would leak queries);
+//  - the target must be an OPERATOR-ALLOWLISTED provider URL
+//    (PROXY_DOH_ALLOWLIST, resolveProxyTarget) — the fetch target is never
+//    request data, so the endpoint is not a fetch relay;
 //  - `redirect: "error"` — never follow redirects;
 //  - responses are bounded by config.maxBodyBytes and must parse as JSON;
 //  - only fixed Accept/UA variants are sent (no client headers forwarded).
@@ -61,26 +64,55 @@ export function handleDohProxy(config: DoHConfig) {
       return textError(405, "Method Not Allowed", corsHeaders());
     }
 
-    const doh = c.req.query("doh");
+    const dohRaw = c.req.query("doh");
     const domain = c.req.query("domain") ?? c.req.query("name");
     const type = (c.req.query("type") ?? "all").toUpperCase();
-    if (!doh || !domain) return textError(400, "Missing doh/domain parameters", corsHeaders());
-    if (!/^https:\/\//i.test(doh)) return textError(400, "doh must be an https:// URL", corsHeaders());
+    if (!dohRaw || !domain) return textError(400, "Missing doh/domain parameters", corsHeaders());
     if (!ALLOWED_TYPES.has(type)) return textError(400, `unsupported type: ${type}`, corsHeaders());
     if (domain.length > 253 || !/^[a-zA-Z0-9._-]+$/.test(domain)) {
       return textError(400, "invalid domain", corsHeaders());
     }
+    // SSRF guard: the fetch target must be an allowlisted provider URL
+    // (config data), never raw request data. The match is inlined (no
+    // helper function on the tainted path): the selected target is a direct
+    // element of config.proxyTargets, so only the CHOICE — never the VALUE —
+    // depends on the request. Query params cross into the fetch helper only
+    // as a URLSearchParams boundary (same shape as the dns-json path).
+    let dohTarget: string | null = null;
+    try {
+      const parsedDoh = new URL(dohRaw);
+      if (parsedDoh.protocol === "https:") {
+        const key = `${parsedDoh.origin}${parsedDoh.pathname.replace(/\/+$/, "")}`;
+        for (const t of config.proxyTargets) {
+          if (t === key) {
+            dohTarget = t;
+            break;
+          }
+        }
+      }
+    } catch {
+      // fall through with dohTarget = null
+    }
+    if (!dohTarget) {
+      return textError(400, "doh must be an allow-listed DoH provider URL", corsHeaders());
+    }
+    const paramsFor = (t: string): URLSearchParams => {
+      const p = new URLSearchParams();
+      p.set("name", domain);
+      p.set("type", t);
+      return p;
+    };
 
     try {
       if (type === "ALL") {
         const [a, aaaa, ns] = await Promise.all([
-          queryDnsJson(config, doh, domain, "A"),
-          queryDnsJson(config, doh, domain, "AAAA"),
-          queryDnsJson(config, doh, domain, "NS"),
+          queryDnsJson(config, dohTarget, paramsFor("A")),
+          queryDnsJson(config, dohTarget, paramsFor("AAAA")),
+          queryDnsJson(config, dohTarget, paramsFor("NS")),
         ]);
         return jsonOk(mergeAll(a, aaaa, ns));
       }
-      return jsonOk(await queryDnsJson(config, doh, domain, type));
+      return jsonOk(await queryDnsJson(config, dohTarget, paramsFor(type)));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return new Response(JSON.stringify({ error: `DNS 查询失败: ${msg}` }, null, 2), {
@@ -95,16 +127,17 @@ export function handleDohProxy(config: DoHConfig) {
   };
 }
 
-/** One dns-json query against the selected provider (multi-Accept fallback). */
+/** One dns-json query against the allowlisted provider (multi-Accept fallback). */
 async function queryDnsJson(
   config: DoHConfig,
-  doh: string,
-  domain: string,
-  type: string,
+  dohTarget: string,
+  params: URLSearchParams,
 ): Promise<JsonSections> {
-  const url = new URL(doh);
-  url.searchParams.set("name", domain);
-  url.searchParams.set("type", type);
+  // dohTarget is a canonical entry from config.proxyTargets (never request
+  // data — see resolveProxyTarget); the query string arrives as a
+  // URLSearchParams built by the caller.
+  const url = new URL(dohTarget);
+  url.search = params.toString();
 
   // NOTE: deliberately NOT bounded by TOTAL_TIMEOUT_MS (README: the proxy
   // keeps CF-Workers-DoH's original per-fetch semantics — each Accept variant

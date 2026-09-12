@@ -160,7 +160,15 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       }
       // Read the body incrementally and abort as soon as the cap is exceeded:
       // a chunked / unknown-length body must never be fully buffered first.
-      const read = await readBodyBounded(c, config.maxBodyBytes);
+      let read: Uint8Array<ArrayBuffer> | null;
+      try {
+        read = await readBodyBounded(c, config.maxBodyBytes);
+      } catch {
+        // The client stream errored mid-read (e.g. the connection was
+        // aborted during upload): that is a client-side failure and must
+        // not escape the handler as an unhandled 500.
+        return textError(400, "Failed to read request body", corsHeaders());
+      }
       if (read === null) return textError(413, "Payload Too Large", corsHeaders());
       message = read;
     } else {
@@ -257,6 +265,13 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
       }
     }
 
+    // The rewrites above can only GROW the message (ECS injection adds up to
+    // 31 bytes): a query accepted exactly at the 65535-byte cap may cross the
+    // RFC 8484 wire maximum and must never be forwarded upstream.
+    if (message.length > config.maxBodyBytes) {
+      return textError(413, "Payload Too Large", corsHeaders());
+    }
+
     // ── Upstream selection ──
     let upstreamList =
       ecsSensitive && config.ecsUpstreamUrls.length > 0
@@ -265,7 +280,7 @@ export function handleDnsQuery(config: DoHConfig, behavior: EcsBehavior) {
     const provider = flags.provider;
     if (provider) {
       const mapped = resolveProvider(config, provider);
-      if (!mapped) return textError(404, `Unknown provider: ${provider}`, corsHeaders());
+      if (!mapped) return textError(404, "Unknown provider", corsHeaders());
       upstreamList = [mapped];
     }
 
@@ -361,6 +376,10 @@ function infoText(config: DoHConfig): Response {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "public, s-maxage=60",
+      // Content negotiation: this page is only served for Accept values that
+      // match neither dns-message nor dns-json, so a shared cache must key it
+      // by Accept instead of by URL alone.
+      Vary: "Accept",
     },
   });
 }

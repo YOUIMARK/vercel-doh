@@ -120,6 +120,7 @@ curl -X POST --data-binary @query.bin \
 | `TTL_JITTER` | `0` | 缓存 TTL 抖动(0–1 小数,默认 0 = 关): 把 `s-maxage` **只降不升**(`max(1, floor(权威TTL × (1−rand×jitter)))`),防 CDN 到期雪崩;绝不把新鲜度抬过权威 TTL |
 | `FORCE_RESPONSE_PADDING` | `false` | RFC 8467 响应填充(**Random-Block-Length**: 每次随机选 128/256/512 字节块对齐,防流量分析;响应无 OPT RR 时自动追加) |
 | `DOMAIN_MAPPINGS` | `{}` | 路径映射 JSON,如 `{"google":{"targetDomain":"dns.google"}}` |
+| `PROXY_DOH_ALLOWLIST` | 前端下拉的 7 个提供商 | `/dns-query-proxy` 允许的 `doh=` 上游白名单(逗号分隔 https URL)。**fetch 目标永远是配置数据而非请求数据**(SSRF 防护): 不在白名单内的 `doh=` 一律 400;需自定义提供商时在此扩展 |
 | `DEBUG_LOGGING` | `false` | 调试模式: 输出调试日志(不打印查询内容)+ dns-message 路径附 `X-DOH-upstream`/`X-DOH-rcode`/`X-DOH-cache`、dns-json 路径附 `X-DOH-upstream`/`X-DOH-cache` 诊断响应头 |
 | `APP_VERSION` | `1.0.0` | 信息页展示的版本号 |
 

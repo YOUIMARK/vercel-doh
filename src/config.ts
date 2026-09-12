@@ -51,6 +51,14 @@ export interface DoHConfig {
   forceResponsePadding: boolean;
   /** Optional path -> upstream mapping for /dns-query/{provider}. */
   domainMappings: Record<string, DomainMapping>;
+  /**
+   * Allowlisted upstream URLs for the /dns-query-proxy JSON relay. The fetch
+   * target is ALWAYS one of these operator-configured entries — never raw
+   * request data (SSRF guard: the endpoint used to accept any https URL and
+   * could be abused as a fetch relay). Defaults mirror the frontend
+   * provider dropdown; extend via PROXY_DOH_ALLOWLIST.
+   */
+  proxyTargets: string[];
   debugLogging: boolean;
   appVersion: string;
   /** Hard cap on the DNS message size we accept. */
@@ -91,6 +99,17 @@ export const DEFAULTS = {
   FORCE_RESPONSE_PADDING: false,
   DEBUG_LOGGING: false,
   APP_VERSION: "1.0.0",
+  // /dns-query-proxy allowlist — mirrors the frontend provider dropdown
+  // (home.ts). Same URLs, so every dropdown selection works out of the box.
+  PROXY_DOH_ALLOWLIST: [
+    "https://dns.alidns.com/resolve",
+    "https://sm2.doh.pub/dns-query",
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+    "https://dns.adguard-dns.com/resolve",
+    "https://dns.nextdns.io",
+    "https://v.recipes/dns-query",
+  ].join(","),
   // RFC 8484: a DNS message is bounded by the 2-byte length field at
   // 65535 bytes — 65536 is NOT a legal message size. Used for both the
   // request body cap and the upstream response cap.
@@ -152,6 +171,21 @@ function parseUrlList(value: string | undefined, fallback: string): string[] {
     if (parsed.protocol !== "https:") throw new Error(`upstream URL must be https: "${u}"`);
   }
   return urls;
+}
+
+/**
+ * Normalizes a /dns-query-proxy allowlist entry to its canonical form
+ * ("origin + path", no query/fragment/userinfo/trailing slash) so request
+ * URLs can be matched exactly and the fetch always uses the clean
+ * config-derived URL.
+ */
+function normalizeProxyTarget(u: string): string | null {
+  try {
+    const parsed = new URL(u);
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
 }
 
 function parseDomainMappings(value: string | undefined): Record<string, DomainMapping> {
@@ -250,6 +284,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DoHConfig {
     raceUpstreams: parseBool(env.RACE_UPSTREAMS, DEFAULTS.RACE_UPSTREAMS),
     forceResponsePadding: parseBool(env.FORCE_RESPONSE_PADDING, DEFAULTS.FORCE_RESPONSE_PADDING),
     domainMappings: parseDomainMappings(env.DOMAIN_MAPPINGS),
+    proxyTargets: parseUrlList(env.PROXY_DOH_ALLOWLIST, DEFAULTS.PROXY_DOH_ALLOWLIST)
+      .map(normalizeProxyTarget)
+      .filter((t): t is string => t !== null),
     debugLogging: parseBool(env.DEBUG_LOGGING, DEFAULTS.DEBUG_LOGGING),
     appVersion: parseAppVersion(env.APP_VERSION),
     maxBodyBytes: DEFAULTS.MAX_BODY_BYTES,

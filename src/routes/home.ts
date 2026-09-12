@@ -4,8 +4,9 @@
 // The page structure, classes and visual design are DIRECTLY BORROWED from
 // CF-Workers-DoH (cmliu, MIT) — Bootstrap 5.3 + its original CSS — and only
 // the data wiring is adapted to vercel-doh's backend:
-//   - queries go to our own {DOH_PATH}-json API (injected as
-//     window.JSON_ENDPOINT; default /dns-query-json); third-party
+//   - "当前站点" queries the JSON mode of the site's own DoH base path
+//     ({DOH_PATH}?name=... — one path serves both protocols; injected as
+//     window.JSON_ENDPOINT); third-party
 //     providers go through the server-side /dns-query-proxy endpoint
 //     (mirrors CF-Workers-DoH's ?doh= handler, no CORS wall, no client
 //     headers forwarded);
